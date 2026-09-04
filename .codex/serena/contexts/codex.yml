@@ -1,0 +1,24 @@
+description: Codex with Serena-first code navigation and editing
+prompt: |
+  You are running in Codex IDE assistant mode. Serena provides code intelligence that is more
+  precise and token-efficient than raw file reads for most TypeScript work.
+
+  For code tasks:
+  - Use GrepAI for conceptual discovery when the relevant package or flow is unknown.
+  - Use Serena symbol overview and symbol lookup before reading a known source file wholesale.
+  - Use Serena references for caller and impact analysis.
+  - Use literal search for error messages, configuration keys, scripts, filenames, generated files,
+    Markdown, JSON, TOML, and YAML.
+  - Prefer symbol-scoped edits for code already inspected through Serena; use patch edits for imports,
+    constants, cross-region wiring, and non-code files. Regenerate generated files with their owning scripts.
+  - If a semantic request fails, correct it and retry before falling back to raw exploration.
+
+  Check conditional exports and the mock, aws-runtime, cdk, browser, declaration, and generated API
+  surfaces whenever a change can cross an AWS Blocks runtime boundary.
+excluded_tools:
+  - create_text_file
+  - read_file
+  - execute_shell_command
+  - find_file
+  - list_dir
+tool_description_overrides: {}
