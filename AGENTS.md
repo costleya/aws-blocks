@@ -13,6 +13,66 @@ You're an engineer working **on AWS Blocks itself** — the framework and its Bu
 
 ---
 
+## Personal integration branch
+
+`my-main` is the personal integration branch for local fixes that have not yet landed upstream. Keep upstream `main`
+clean and usable as the comparison base. Create each patch worktree and feature branch from `my-main`, complete the
+normal AWS Blocks verification there, then merge the verified branch back into `my-main`. Do not push any branch
+unless the user explicitly authorizes that push in the current turn.
+
+## Code navigation and editing
+
+Use semantic tools when they are available, but keep the lookup proportional to the question:
+
+- Unknown behavior, package, flow, or impact area: use GrepAI first.
+- Known file but unknown symbol: use Serena's symbol overview, then inspect the relevant symbol.
+- Known symbol: use Serena symbol lookup; use Serena references for callers and refactor scope.
+- Literal strings, errors, configuration keys, scripts, filenames, generated files, and non-code files: use `rg` and
+  targeted reads.
+- If a semantic request fails, correct it and retry before falling back to a broad source read.
+- Prefer symbol-scoped edits for code already inspected through Serena. Use `apply_patch` for imports, constants,
+  cross-region wiring, and non-code files. Regenerate generated files with their owning scripts.
+
+When a change can cross a runtime boundary, inspect the mock, aws-runtime, cdk, browser, declaration, and generated
+API-report surfaces rather than assuming one implementation represents the public contract.
+
+## Subagent orchestration
+
+Use the main thread as coordinator, synthesis owner, and final acceptance owner. For non-trivial work, delegate
+independent repository discovery, external research, production changes, test changes, integrated verification, and
+review when those scopes have stable boundaries. Handle genuinely small, single-owner work directly.
+
+| Role | Use it for |
+|---|---|
+| `repo_explorer` | Unfamiliar repository behavior, package relationships, risks, and likely edit surfaces. |
+| `researcher` | Current external documentation, AWS guidance, regional availability, and source-backed decisions. |
+| `repo_implementer` | Production code and substantial framework or infrastructure changes. |
+| `test_implementer` | `node:test`, parity, CDK, and comprehensive E2E coverage without production edits. |
+| `test_runner` | Post-integration command execution and evidence after every writer finishes. |
+| `code_reviewer` | Independent review of an explicit risk domain before acceptance. |
+
+Workflow rules:
+
+1. Give every assignment an outcome, acceptance criteria, public contract, owned files or symbols, constraints, and
+   expected evidence. Use `fork_turns = "none"` with a self-contained prompt for configured specialist roles.
+2. Use multiple agents only for stable, non-overlapping scopes. No two writers own the same file or symbol unless
+   the assignment explicitly requests competing alternatives.
+3. For a bug, sequence the work: a `test_implementer` first adds and confirms the failing repro, then a
+   `repo_implementer` makes it green. Prefer comprehensive E2E for customer-visible bugs and package tests for
+   internal behavior.
+4. For a feature with stable contracts, production and tests may be written in parallel. If the contract is
+   unsettled, establish it before assigning tests.
+5. Do not duplicate an active owner's work or interrupt merely because progress is not yet visible. Return review,
+   lint, formatting, build, and focused-test fallout to that owner with `followup_task`; it remains unfinished work.
+6. Wait for every writer before final verification. Use one `test_runner` for the integrated gate; it reports defects
+   and does not repair them.
+7. Send non-trivial integrated changes to one `code_reviewer` by default. Add another reviewer only for a clearly
+   disjoint risk domain. Route corrections back to the same reviewer for confirmation.
+8. The main thread owns long-lived server and sandbox lifecycle. Follow the tmux pattern below, and always destroy a
+   deployed sandbox plus verify deletion before finishing.
+
+---
+
 ## 🚦 Core rules (these gate a PR)
 
 1. CDK synth must run with **`--conditions=cdk`**. Without it, BBs load their mocks and synth produces no infrastructure.
