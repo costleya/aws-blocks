@@ -108,3 +108,9 @@ bench-variance*/
 test-apps/native-bindings/package-lock.json
 native/kotlin/example/typescript/package-lock.json
 native/swift/Demo/typescript-demo/package-lock.json
+
+# Repository-local Codex skills are managed by skills-lock.json and copied
+# into new worktrees by the Codex local environment setup script.
+.agents/skills/*
+!.agents/skills/lgtm/
+!.agents/skills/lgtm/**

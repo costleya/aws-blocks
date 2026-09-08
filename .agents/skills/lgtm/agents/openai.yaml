@@ -1,0 +1,7 @@
+interface:
+  display_name: 'LGTM'
+  short_description: 'Stack a worktree onto local my-main'
+  default_prompt: 'Use $lgtm to commit this worktree, rebase it onto local my-main, and fast-forward my-main.'
+
+policy:
+  allow_implicit_invocation: false
