@@ -30,6 +30,8 @@ Use semantic tools when they are available, but keep the lookup proportional to 
 - Literal strings, errors, configuration keys, scripts, filenames, generated files, and non-code files: use `rg` and
   targeted reads.
 - If a semantic request fails, correct it and retry before falling back to a broad source read.
+- Do not read an entire source file just to inspect a known symbol. Before a full source-file read, explain why the
+  available semantic tools are insufficient for that specific read.
 - Prefer symbol-scoped edits for code already inspected through Serena. Use `apply_patch` for imports, constants,
   cross-region wiring, and non-code files. Regenerate generated files with their owning scripts.
 
@@ -49,7 +51,12 @@ review when those scopes have stable boundaries. Handle genuinely small, single-
 | `repo_implementer` | Production code and substantial framework or infrastructure changes. |
 | `test_implementer` | `node:test`, parity, CDK, and comprehensive E2E coverage without production edits. |
 | `test_runner` | Post-integration command execution and evidence after every writer finishes. |
-| `code_reviewer` | Independent review of an explicit risk domain before acceptance. |
+| `code_reviewer` | Routine independent review at Sol Medium before acceptance. |
+| `code_reviewer_deep` | Materially high-risk authorization, concurrency, persistence-consistency, streaming, or architectural review at Astra Medium. |
+
+Prefer the configured `researcher` for external technology research. It checks relevant first-party documentation
+tools first, uses AWS knowledge tools for AWS questions, and falls back through Context7 to public web sources. The
+main thread may continue independent repository work while research runs and should not duplicate the delegated lookup.
 
 Workflow rules:
 
@@ -62,12 +69,18 @@ Workflow rules:
    internal behavior.
 4. For a feature with stable contracts, production and tests may be written in parallel. If the contract is
    unsettled, establish it before assigning tests.
-5. Do not duplicate an active owner's work or interrupt merely because progress is not yet visible. Return review,
-   lint, formatting, build, and focused-test fallout to that owner with `followup_task`; it remains unfinished work.
+5. Do not duplicate an active owner's work or interrupt merely because progress is not yet visible or several waits
+   time out. Continue independent work, use a non-urgent status message when useful, and wait for the result. Interrupt
+   only for cancellation, replacement, unsafe action, ownership conflict, material scope correction, or a reported
+   blocker. Return review, lint, formatting, build, and focused-test fallout to that owner with `followup_task`; it
+   remains unfinished work. Use a fresh agent for a genuinely new bounded deliverable, stable test layer, material
+   architectural pivot, or role-boundary transition, with a concise standalone handoff.
 6. Wait for every writer before final verification. Use one `test_runner` for the integrated gate; it reports defects
    and does not repair them.
-7. Send non-trivial integrated changes to one `code_reviewer` by default. Add another reviewer only for a clearly
-   disjoint risk domain. Route corrections back to the same reviewer for confirmation.
+7. Send non-trivial integrated changes to one `code_reviewer` by default. Use `code_reviewer_deep` instead for
+   materially high-risk authorization, concurrency, persistence-consistency, streaming, or architectural work; do
+   not automatically use both. Add another reviewer only for a clearly disjoint risk domain. Route corrections back
+   to the same reviewer for confirmation; compaction alone is not a reason to replace that reviewer.
 8. The main thread owns long-lived server and sandbox lifecycle. Follow the tmux pattern below, and always destroy a
    deployed sandbox plus verify deletion before finishing.
 
