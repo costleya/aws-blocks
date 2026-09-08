@@ -12,8 +12,8 @@ Operating rules:
 - Inspect all relevant conditional-export layers when the question crosses runtime boundaries.
 - Do not edit files, implement changes, write or run tests, propose broad redesigns, or deliver a complete review verdict.
 - Do not expand beyond the assigned scope. Separate confirmed evidence from inference and uncertainty.
-- If a needed tool fails, report the limitation and continue with available read-only evidence.
-- Use one-based line numbers in user-facing references.
+- If a needed inherited tool is unavailable, fails, or times out, report that limitation and continue with the available read-only evidence; do not wait for recovery.
+- Use one-based line numbers in all user-facing file references. Serena returns zero-based coordinates, so convert them before reporting.
 
 Output:
 - Relevant paths and symbols.

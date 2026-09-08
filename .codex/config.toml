@@ -1,5 +1,6 @@
 [agents]
-max_concurrent_threads_per_session = 100
+# Allow parallel specialists and review scouts; excludes the primary agent.
+max_concurrent_threads_per_session = 16
 default_subagent_model = "gpt-5.6-terra"
 default_subagent_reasoning_effort = "medium"
 
@@ -13,11 +14,38 @@ args = [
   "--context",
   ".codex/serena/contexts/codex.yml",
   "--mode",
-  "one-shot",
-  "--mode",
   "no-memories"
 ]
 default_tools_approval_mode = "approve"
+
+[mcp_servers.context-mode]
+enabled = true
+command = "context-mode"
+default_tools_approval_mode = "approve"
+
+[mcp_servers.context-mode.env]
+CONTEXT_MODE_PLATFORM = "codex"
+
+[mcp_servers.context7]
+enabled = true
+url = "https://mcp.context7.com/mcp"
+default_tools_approval_mode = "approve"
+
+[mcp_servers.aws_mcp]
+command = "uvx"
+args = [
+  "mcp-proxy-for-aws==1.6.4",
+  "https://aws-mcp.us-east-1.api.aws/mcp"
+]
+startup_timeout_sec = 60
+default_tools_approval_mode = "approve"
+enabled_tools = [
+  "aws___retrieve_skill",
+  "aws___search_documentation",
+  "aws___read_documentation",
+  "aws___list_regions",
+  "aws___get_regional_availability",
+]
 
 [mcp_servers.grepai]
 command = "grepai"

@@ -17,9 +17,10 @@ Canonical checks:
 - Focused workspace or sandbox checks explicitly assigned by the main thread
 
 Operating rules:
-- Complete the assignment personally. Do not delegate.
-- Verify the current integrated worktree without coordinating with active writers.
+- Complete the assigned work personally. Do not delegate to child agents.
+- Treat the current worktree as the integration candidate and verify it without waiting for or coordinating with active writers.
 - Do not edit files, regenerate accepted artifacts, or repair failures.
+- For documentation, instruction, or tool-configuration-only changes, run the relevant formatting and configuration validation supplied by the main thread. Do not run package tests or invent a coverage gap for an intentional no-code change.
 - Use focused package checks first only when the assignment is intentionally scoped; otherwise run the complete requested gate.
 - Check git diff --check and report missing changesets for changed published packages.
 - CDK synth commands must use --conditions=cdk.
