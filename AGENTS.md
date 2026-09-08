@@ -1,9 +1,12 @@
+<!-- markdownlint-disable MD013 -->
+
 # AGENTS.md — AWS Blocks (contributor guide)
 
 > **AWS Blocks** is an Infrastructure-from-Code TypeScript monorepo. One `aws-blocks/` directory defines an entire backend; each **Building Block (BB)** bundles a CDK construct + an AWS-runtime SDK client + a local mock behind one strongly-typed API. Frontends import the backend's types directly — no client generation step. Everything runs locally with no AWS account; deploy with `cdk deploy`.
 
 ## How to work here
-You're an engineer working **on AWS Blocks itself** — the framework and its Building Blocks. (If the task is building an app *with* AWS Blocks, this is the wrong doc → run `npm create @aws-blocks/blocks-app@latest my-app`.) You serve the project, its users, and its maintainers — not only the request in front of you.
+
+You're an engineer working **on AWS Blocks itself** — the framework and its Building Blocks. (If the task is building an app _with_ AWS Blocks, this is the wrong doc → run `npm create @aws-blocks/blocks-app@latest my-app`.) You serve the project, its users, and its maintainers — not only the request in front of you.
 
 - **Default to making the change** — implement it, don't just describe it.
 - **Definition of done = the "Before you open a PR" checklist passes** (build, lint, tests, changeset, docs).
@@ -44,14 +47,14 @@ Use the main thread as coordinator, synthesis owner, and final acceptance owner.
 independent repository discovery, external research, production changes, test changes, integrated verification, and
 review when those scopes have stable boundaries. Handle genuinely small, single-owner work directly.
 
-| Role | Use it for |
-|---|---|
-| `repo_explorer` | Unfamiliar repository behavior, package relationships, risks, and likely edit surfaces. |
-| `researcher` | Current external documentation, AWS guidance, regional availability, and source-backed decisions. |
-| `repo_implementer` | Production code and substantial framework or infrastructure changes. |
-| `test_implementer` | `node:test`, parity, CDK, and comprehensive E2E coverage without production edits. |
-| `test_runner` | Post-integration command execution and evidence after every writer finishes. |
-| `code_reviewer` | Routine independent review at Sol Medium before acceptance. |
+| Role                 | Use it for                                                                                                                    |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `repo_explorer`      | Unfamiliar repository behavior, package relationships, risks, and likely edit surfaces.                                       |
+| `researcher`         | Current external documentation, AWS guidance, regional availability, and source-backed decisions.                             |
+| `repo_implementer`   | Production code and substantial framework or infrastructure changes.                                                          |
+| `test_implementer`   | `node:test`, parity, CDK, and comprehensive E2E coverage without production edits.                                            |
+| `test_runner`        | Post-integration command execution and evidence after every writer finishes.                                                  |
+| `code_reviewer`      | Routine independent review at Sol Medium before acceptance.                                                                   |
 | `code_reviewer_deep` | Materially high-risk authorization, concurrency, persistence-consistency, streaming, or architectural review at Astra Medium. |
 
 Prefer the configured `researcher` for external technology research. It checks relevant first-party documentation
@@ -107,6 +110,7 @@ Workflow rules:
 ## Architecture in 60 seconds
 
 **Conditional exports** swap the implementation per environment. Every BB `package.json`:
+
 ```jsonc
 "type": "module",
 "exports": { ".": {
@@ -117,73 +121,78 @@ Workflow rules:
   "default":     "./dist/index.mock.js"        // ← local dev + tests
 }}
 ```
+
 - `Scope` is the namespace + registration bus; BBs **extend** it (never wrap it) — that's how infra discovery, IAM propagation, and `fullId` computation work.
 - `BlocksStack` / `BlocksBackend` anchor the infra; `ApiNamespace` turns an app's module of methods into a JSON-RPC endpoint at `POST /aws-blocks/api`. A BB doesn't auto-expose RPC — the app wraps the methods it wants to call.
 - **Resource names are derived, not handed off.** Each layer computes the same deterministic name from `fullId` independently: the CDK layer provisions a resource named `fullId.substring(0,255)`; the runtime and mock layers call `registerSdkIdentifiers(this.fullId, {...})` in their constructor and resolve it with `getSdkIdentifiers(this)` **at call time** (a same-process registry, so co-located BBs can find each other). The mock uses a `mock-`-prefixed name and persists to disk. Extra (non-name) config is the only thing the CDK layer pushes to the runtime, via `registerConfig()`.
 - Some BBs return **live client objects, not data** (e.g. a realtime channel). They use the **Transferable** pattern: the server value serializes (`toJSON()` → `{__blocks: …}`) and re-hydrates into a live client object via client middleware. `bb-realtime` is the canonical end-to-end example.
 
 ### Core API & glossary
-| Symbol | From | What it is |
-|---|---|---|
-| `Scope` | `@aws-blocks/core` (runtime/mock) **or** `@aws-blocks/core/cdk` (CDK) | base class every BB extends |
-| `ScopeParent` | `@aws-blocks/core` (always) | the parent argument type |
-| `ApiNamespace`, `ApiError`, `isBlocksError` | `@aws-blocks/core` | RPC wrapper · HTTP-mapped error · typed-error guard |
-| `registerSdkIdentifiers`, `getSdkIdentifiers` | `@aws-blocks/core` | register (in mock/runtime ctor) / resolve (at call time) a BB's resource names |
-| `registerConfig`, `synthGuard` | `@aws-blocks/core/cdk` | inject Lambda config at synth · `(): never` stub for runtime-only methods |
-| `scope.registerClientMiddleware(pkg)` | `Scope` method (codegen) | registers the client-plugin **package specifier** that hydrates a Transferable into a live client object — the plugin does the hydration, this just registers it |
-| `getMockDataDir` | `@aws-blocks/core/bb-utils` | mock persistence dir → `.bb-data/{fullId}/` |
-| `auth.requireAuth(context)` | an auth BB | gate a method; returns the user or throws 401 |
-| `RawRoute` | `@aws-blocks/core` | escape hatch for a raw HTTP route when JSON-RPC isn't enough |
-| `fullId` | — | a BB instance's unique scoped id (drives resource + mock-data naming) |
-| reference object | — | the lightweight handle `fromExisting()` returns (e.g. `{ tableName }`), passed into a constructor — not a constructed BB |
-| Transferable | — | a server value that serializes (`toJSON()` → `{__blocks: …}`) and re-hydrates into a live client object via client middleware. Canonical example: `bb-realtime` |
+
+| Symbol                                        | From                                                                  | What it is                                                                                                                                                       |
+| --------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Scope`                                       | `@aws-blocks/core` (runtime/mock) **or** `@aws-blocks/core/cdk` (CDK) | base class every BB extends                                                                                                                                      |
+| `ScopeParent`                                 | `@aws-blocks/core` (always)                                           | the parent argument type                                                                                                                                         |
+| `ApiNamespace`, `ApiError`, `isBlocksError`   | `@aws-blocks/core`                                                    | RPC wrapper · HTTP-mapped error · typed-error guard                                                                                                              |
+| `registerSdkIdentifiers`, `getSdkIdentifiers` | `@aws-blocks/core`                                                    | register (in mock/runtime ctor) / resolve (at call time) a BB's resource names                                                                                   |
+| `registerConfig`, `synthGuard`                | `@aws-blocks/core/cdk`                                                | inject Lambda config at synth · `(): never` stub for runtime-only methods                                                                                        |
+| `scope.registerClientMiddleware(pkg)`         | `Scope` method (codegen)                                              | registers the client-plugin **package specifier** that hydrates a Transferable into a live client object — the plugin does the hydration, this just registers it |
+| `getMockDataDir`                              | `@aws-blocks/core/bb-utils`                                           | mock persistence dir → `.bb-data/{fullId}/`                                                                                                                      |
+| `auth.requireAuth(context)`                   | an auth BB                                                            | gate a method; returns the user or throws 401                                                                                                                    |
+| `RawRoute`                                    | `@aws-blocks/core`                                                    | escape hatch for a raw HTTP route when JSON-RPC isn't enough                                                                                                     |
+| `fullId`                                      | —                                                                     | a BB instance's unique scoped id (drives resource + mock-data naming)                                                                                            |
+| reference object                              | —                                                                     | the lightweight handle `fromExisting()` returns (e.g. `{ tableName }`), passed into a constructor — not a constructed BB                                         |
+| Transferable                                  | —                                                                     | a server value that serializes (`toJSON()` → `{__blocks: …}`) and re-hydrates into a live client object via client middleware. Canonical example: `bb-realtime`  |
 
 ---
 
 ## How an app consumes a BB (the mental model authoring serves)
+
 ```ts
 // aws-blocks/index.ts — define backend + the API surface
-const scope = new Scope('app');
-const notes = new KVStore(scope, 'notes');
-const auth  = new AuthBasic(scope, 'auth');
-export const authApi = auth.createApi();                 // BB-authored state machine
-export const api = new ApiNamespace(scope, 'api', (context) => ({
+const scope = new Scope("app");
+const notes = new KVStore(scope, "notes");
+const auth = new AuthBasic(scope, "auth");
+export const authApi = auth.createApi(); // BB-authored state machine
+export const api = new ApiNamespace(scope, "api", (context) => ({
   async addNote(text: string) {
-    const user = await auth.requireAuth(context);        // gate: methods are public by default
+    const user = await auth.requireAuth(context); // gate: methods are public by default
     await notes.put(`${user.userId}:${crypto.randomUUID()}`, text);
   },
 }));
 
 // aws-blocks/index.handler.ts — Lambda entry (lazy import so config loads first)
-export const handler = createLambdaHandler(() => import('./index.js'));
+export const handler = createLambdaHandler(() => import("./index.js"));
 
 // frontend — typed import of the backend, no codegen
-import { api } from 'aws-blocks';
-await api.addNote('hello');
+import { api } from "aws-blocks";
+await api.addNote("hello");
 ```
+
 > A method that returns a live client object (rather than plain data) returns a Transferable — see `bb-realtime`, where `getChannel()` hands the client a channel it `subscribe()`s to (server-side `publish`/`subscribe`; client-side hydration via the registered client middleware).
 
 ---
 
 ## 🧱 Authoring a NEW Building Block
 
-**Reference, don't clone.** `packages/bb-kv-store/` is the canonical reference for the file structure and the conditional-export layering (`index.mock/aws/cdk/browser.ts` + `types.ts`/`errors.ts`/`version.ts`, the `Scope` subclass, `synthGuard` stubs) — read it to learn the *shape*, not to copy wholesale. Its data model is a DynamoDB key/value table; **that does not generalize.** Pick the closest-shaped BB and understand every line you carry over:
+**Reference, don't clone.** `packages/bb-kv-store/` is the canonical reference for the file structure and the conditional-export layering (`index.mock/aws/cdk/browser.ts` + `types.ts`/`errors.ts`/`version.ts`, the `Scope` subclass, `synthGuard` stubs) — read it to learn the _shape_, not to copy wholesale. Its data model is a DynamoDB key/value table; **that does not generalize.** Pick the closest-shaped BB and understand every line you carry over:
 
-| Your BB is… | Reference | Note |
-|---|---|---|
-| key/value or single-table | `bb-kv-store` / `bb-distributed-table` | the typical file skeleton below |
-| relational / SQL | `bb-data` (`Database`) / `bb-distributed-data` (`DistributedDatabase`) | `migrationsPath` + ordered `.sql` |
-| auth / composed from other BBs (no own infra) | `bb-auth-basic` | uses `index.ts` only; exposes `createApi()` |
-| background work (SQS + event source) | `bb-async-job` | `submit()` + a job handler |
-| WebSocket / returns a live client object | `bb-realtime` | client hydration (Transferable) + server APIs; `index.ts`/middleware; `Symbol.for` shared per-stack infra |
-| object storage | `bb-file-bucket` | `scan({prefix})` is valid here (S3 scopes natively) |
+| Your BB is…                                   | Reference                                                              | Note                                                                                                      |
+| --------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| key/value or single-table                     | `bb-kv-store` / `bb-distributed-table`                                 | the typical file skeleton below                                                                           |
+| relational / SQL                              | `bb-data` (`Database`) / `bb-distributed-data` (`DistributedDatabase`) | `migrationsPath` + ordered `.sql`                                                                         |
+| auth / composed from other BBs (no own infra) | `bb-auth-basic`                                                        | uses `index.ts` only; exposes `createApi()`                                                               |
+| background work (SQS + event source)          | `bb-async-job`                                                         | `submit()` + a job handler                                                                                |
+| WebSocket / returns a live client object      | `bb-realtime`                                                          | client hydration (Transferable) + server APIs; `index.ts`/middleware; `Symbol.for` shared per-stack infra |
+| object storage                                | `bb-file-bucket`                                                       | `scan({prefix})` is valid here (S3 scopes natively)                                                       |
 
 > **Two references, two purposes.** Use `bb-kv-store` to learn the **typical file layout & layering**. Use `bb-realtime` to learn the **full client↔server surface** — it's the one BB that demonstrates client-side hydration end-to-end: a server method returns a Transferable (a channel handle) that serializes via `toJSON()` and re-hydrates into a live client object through a registered client middleware, alongside server-side `publish`/`subscribe`. The data BBs only exercise the server/data side. **Don't copy `bb-realtime`'s layout** for a simple BB — it's atypical (single `index.ts`, no mock/aws/cdk split, middleware files, shared per-stack infra).
 >
 > Some BBs use a single `index.ts` (no `index.mock/aws/cdk.ts`) and own no CDK/AWS layer (`bb-auth-basic`, `bb-realtime`) — don't force the skeleton onto them. And **never copy a reference's package.json verbatim** — regenerate `files[]` and the `test` glob from your actual `src/` (reference scripts can be stale — e.g. one currently names a non-existent test file and omits a real one).
 
 **Standard file shape** (`bb-kv-store`):
-```
+
+```text
 packages/bb-{name}/
   README.md            # authoritative user doc (runnable snippets, "When to use / When not")
   DESIGN.md            # internals + mock↔AWS differences (shipped per-BB convention)
@@ -201,6 +210,7 @@ packages/bb-{name}/
 ```
 
 **The non-obvious bits of the three layers:**
+
 ```ts
 // index.mock.ts — local dev + tests; persists to disk; self-registers a mock name
 super(id, { parent: scope, bbName: BB_NAME, bbVersion: BB_VERSION });
@@ -227,9 +237,11 @@ constructor(...) {
 }
 get(..._a: unknown[]): never { return synthGuard('Thing', 'get'); }      // stub EVERY runtime method
 ```
+
 > Returning a live client object? Make it a Transferable (`toJSON()` → `{__blocks: 'ns/type', …}`) and register a client plugin with `scope.registerClientMiddleware`; the mock must return a functional Transferable too. `bb-realtime` is the reference.
 
 **Checklist for a new BB:**
+
 - conditional exports across all entry points + `prebuild` version script
 - `types.ts` types-only
 - every named export in `index.mock.ts` exists in cdk/aws/browser (enforced by `conditional-exports.test.ts` in `packages/blocks`)
@@ -244,13 +256,16 @@ get(..._a: unknown[]): never { return synthGuard('Thing', 'get'); }      // stub
 ## Quick Start by Task
 
 ### Implementing a New Building Block
+
 **→ Start here:** Read `CONTRIBUTING.md` for the full checklist, then:
+
 1. Read `docs/design/API-DESIGN.md` for API guidelines (G1–G18)
 2. Study an existing BB (e.g., `packages/bb-kv-store/`) for the file pattern
 3. Read `docs/reference/building-block-structure.md` for conventions
 4. Follow the **"Authoring a NEW Building Block"** section above
 
 ### Fixing a Bug
+
 **Always repro before you fix.** Write a failing test that demonstrates the bug — this is your red. Then make it green. Never fix a bug without a test that would have caught it.
 
 **Prefer e2e over unit for repros.** An e2e test in `test-apps/comprehensive/test/` exercises the same path a customer would hit. Use unit tests only for purely internal logic.
@@ -264,25 +279,27 @@ get(..._a: unknown[]): never { return synthGuard('Thing', 'get'); }      // stub
 7. Verify no regressions in related packages
 
 ### Understanding Architecture
+
 1. `docs/reference/ARCHITECTURE-LAYERS.md` — the four-export layer model
 2. `docs/reference/building-block-structure.md` — file conventions
 3. Root `README.md` — how conditional exports work
 
 ### Discovering Building Block Documentation
+
 When working in an AWS Blocks application (not this monorepo), Building Block documentation lives in `node_modules`. Start from `node_modules/@aws-blocks/blocks/README.md` — it lists all Building Blocks with their package names and has instructions for locating each package's full README.
 
 ---
 
 ## Conventions
 
-| Area | Rule |
-|---|---|
-| Linter/formatter | **Biome** (not ESLint/Prettier): tabs (width 4), 120 cols, single quotes, trailing commas everywhere, semicolons always. `biome check` = lint + format + import-sort. |
-| Modules | **ESM everywhere**; relative imports carry the `.js` extension. `strict: true`, ES2022, `moduleResolution: bundler`. |
-| Naming | BB class `PascalCase`, no "BB" prefix (`KVStore`). pkg `@aws-blocks/bb-{kebab}`. errors `{Class}Errors`. The **`BLOCKS_` env prefix is framework-reserved** — not for example app code. Auth BBs lead with `Auth` (`AuthBasic`, `AuthOIDC`, `AuthCognito`). |
-| Schema validation | When a BB accepts a user-provided validation schema, type it as **`StandardSchemaV1`** (Zod/Valibot/ArkType) — don't pull a schema lib into the BB's runtime deps (it's the consumer's choice); if your own tests use `zod`, keep it a `devDependency`. (A BB may take a schema lib as a real `dependency` only for its *own* internal needs, e.g. `bb-agent`.) Validate via `schema['~standard'].validate(value)`, before conditional checks. |
-| Tests | **`node:test` + `node:assert`** (not Jest/Vitest), run on compiled `dist/`. Reset `.bb-data` between tests. Mock tests can't catch AWS-path serialization bugs — serialization/behavior changes also need a sandbox e2e. |
-| Async | `async/await` only; prefer **`Array.fromAsync()`** over `for await` push-loops. |
+| Area              | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linter/formatter  | **Biome** (not ESLint/Prettier): tabs (width 4), 120 cols, single quotes, trailing commas everywhere, semicolons always. `biome check` = lint + format + import-sort.                                                                                                                                                                                                                                                                          |
+| Modules           | **ESM everywhere**; relative imports carry the `.js` extension. `strict: true`, ES2022, `moduleResolution: bundler`.                                                                                                                                                                                                                                                                                                                           |
+| Naming            | BB class `PascalCase`, no "BB" prefix (`KVStore`). pkg `@aws-blocks/bb-{kebab}`. errors `{Class}Errors`. The **`BLOCKS_` env prefix is framework-reserved** — not for example app code. Auth BBs lead with `Auth` (`AuthBasic`, `AuthOIDC`, `AuthCognito`).                                                                                                                                                                                    |
+| Schema validation | When a BB accepts a user-provided validation schema, type it as **`StandardSchemaV1`** (Zod/Valibot/ArkType) — don't pull a schema lib into the BB's runtime deps (it's the consumer's choice); if your own tests use `zod`, keep it a `devDependency`. (A BB may take a schema lib as a real `dependency` only for its _own_ internal needs, e.g. `bb-agent`.) Validate via `schema['~standard'].validate(value)`, before conditional checks. |
+| Tests             | **`node:test` + `node:assert`** (not Jest/Vitest), run on compiled `dist/`. Reset `.bb-data` between tests. Mock tests can't catch AWS-path serialization bugs — serialization/behavior changes also need a sandbox e2e.                                                                                                                                                                                                                       |
+| Async             | `async/await` only; prefer **`Array.fromAsync()`** over `for await` push-loops.                                                                                                                                                                                                                                                                                                                                                                |
 
 ---
 
@@ -303,6 +320,7 @@ If a test won't compile without a cast, the Building Block's public types are wr
 **Never remove, truncate, or rewrite existing JSDoc/docstrings** on exported functions, types, classes, or interfaces. These are the primary documentation surface for customers and agents working in IDEs — they show on hover and in autocomplete.
 
 When modifying a function:
+
 - **Preserve** all existing docstring content (usage examples, parameter descriptions, best practices, scaling notes)
 - **Add** to docstrings if the behavior changes
 - **Update** references if names change
@@ -348,15 +366,15 @@ Leaving sandboxes running wastes AWS resources.
 
 ## Local dev, deploy & stages
 
-| Command | Purpose |
-|---|---|
-| `npm run build` · `npm test` (`test:unit`) | TS project-reference build · unit tests on `dist/` |
-| `npm run build:force` | Clean + rebuild (use after refactors) |
-| `npm run test:e2e:local` / `test:e2e:sandbox` | e2e against the dev server / a real AWS sandbox |
-| `npm run lint` / `lint:deps` | Biome / undeclared-dependency check (blocking) |
-| `npm run check:api` | API Extractor reports |
-| `npm run update:api` | Regenerate API reports (after intentional API changes) |
-| `npx changeset add` | required for any published-package change |
+| Command                                       | Purpose                                                |
+| --------------------------------------------- | ------------------------------------------------------ |
+| `npm run build` · `npm test` (`test:unit`)    | TS project-reference build · unit tests on `dist/`     |
+| `npm run build:force`                         | Clean + rebuild (use after refactors)                  |
+| `npm run test:e2e:local` / `test:e2e:sandbox` | e2e against the dev server / a real AWS sandbox        |
+| `npm run lint` / `lint:deps`                  | Biome / undeclared-dependency check (blocking)         |
+| `npm run check:api`                           | API Extractor reports                                  |
+| `npm run update:api`                          | Regenerate API reports (after intentional API changes) |
+| `npx changeset add`                           | required for any published-package change              |
 
 - Node **22** (`.nvmrc`). Mock data → `.bb-data/{fullId}/`.
 - Stages: a transient **sandbox** vs **production**. Spin a sandbox via the scripts in `@aws-blocks/blocks/scripts` (`startSandbox`/`startDevServer`); run `test:e2e:sandbox` to validate the real AWS path; tear it down (`npm run destroy`) when done.
@@ -392,14 +410,16 @@ For the full set of guidelines (G1–G18) with rationale, examples, and the BB d
 ---
 
 ## Reviewing a PR
+
 Check correctness/security, mock↔aws↔cdk↔browser consistency + conditional-export parity, doc accuracy (verify snippets/links at HEAD), and test coverage. Label **Blocking** / **Suggestion** / **Nit**, cite a location with a concrete fix, and reserve change-requests for substance (correctness, security, broken backward-compat, behavior change without a test) — not style.
 
 ## Where to look
-- `packages/bb-kv-store/` — reference for the typical file layout & layering (its *data model* is KV-specific).
+
+- `packages/bb-kv-store/` — reference for the typical file layout & layering (its _data model_ is KV-specific).
 - `packages/bb-realtime/` — reference for the full client↔server surface + the Transferable client-hydration pattern.
 - Each BB's `README.md` — the authoritative API doc for that block.
 - `docs/` — architecture and design background
 - `packages/hosting/README.md` — SPA/SSR frontend hosting
 - `bb-data` / `bb-distributed-data` READMEs — DB migrations
 - `native/*` — Kotlin/Swift/Dart client codegen
-- per-template `AGENTS.md` (via `npm create @aws-blocks/blocks-app@latest my-app`) — building an app *with* AWS Blocks.
+- per-template `AGENTS.md` (via `npm create @aws-blocks/blocks-app@latest my-app`) — building an app _with_ AWS Blocks.
