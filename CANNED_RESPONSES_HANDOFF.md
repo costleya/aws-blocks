@@ -1,0 +1,50 @@
+# Canned response implementation handoff
+
+Worktree: `/Users/costleya/.codex/worktrees/cd16/aws-blocks`
+
+Starting HEAD: `1c05d70b4cc67f2a26e7a63726ff383e1f3a6467`, identical to `my-main` at inspection. Implementation and verification completed before the user subsequently requested branch creation and a local commit. The branch is `codex/canned-response-dictionaries`. No push, merge, deployment, or Document edits were performed.
+
+The user-requested upstream `packages/bb-agent/src/providers/canned.ts` was retrieved from GitHub's raw main source and compared before implementation; it was identical to the starting local provider.
+
+## Behavior
+
+`ModelConfig.cannedResponses?: Record<string, string> | string` forwards to `CannedProvider`'s `responses` option through the existing lazy model factory. Custom dictionaries replace weather/order/help text entries while keeping the generic fallback. Tool-result summaries and tool calls retain priority. Matching uses literal case-insensitive phrases, flexible internal whitespace, Unicode letter/number/underscore boundaries, and dictionary entry order. Custom values are emitted verbatim, including empty or whitespace-only values; default emission is unchanged.
+
+File paths resolve against cwd at provider construction. Each text selection reads one validated snapshot; tool paths skip reads. Missing/unreadable files, malformed JSON, non-object dictionaries, non-string values, and blank keys fail clearly. Corrected files recover on the next selection in the same provider. Runtime writers should atomically rename a complete temporary JSON file in the same directory over the configured file.
+
+## Changed files
+
+- `packages/bb-agent/src/providers/canned.ts`: dictionary selection, validation, file snapshots, verbatim emission; removed an unused SDK import.
+- `packages/bb-agent/src/model-factory.ts`: forwards the new option, preserves lazy Strands imports.
+- `packages/bb-agent/src/types.ts`: additive public configuration field and documentation.
+- `packages/bb-agent/src/index.test.ts`: existing-harness tests for defaults, matching, precedence, inline/file factory forwarding, cast-free Agent use including empty completion, live update/removal/errors/recovery, cwd binding, atomic replacement during a stream, and tool-path read bypass.
+- `packages/bb-agent/README.md` and `DESIGN.md`: usage, runtime semantics, atomic file replacement.
+- `packages/bb-agent/API.md`: generated public configuration addition.
+- `.changeset/canned-response-dictionaries.md`: minor bb-agent changeset.
+
+## Build artifacts and patch integration
+
+Build output is present under `packages/bb-agent/dist` and ignored by Git. Runtime patch hunks belong in `dist/providers/canned.js` and `dist/model-factory.js`. Type changes belong in `dist/types.d.ts` and `dist/providers/canned.d.ts`; corresponding `.d.ts.map` files were regenerated. Source counterparts and README/DESIGN should accompany them if the existing package patch includes those shipped surfaces. `dist/types.js` contains no new runtime value. `dist/index.test.js` contains the regression tests but is not needed for application behavior.
+
+The source package here is `@aws-blocks/bb-agent@0.4.0`. Inspect the Document task's actual installed version, existing patch file, and materialized patched package before integrating. Begin from the package with its existing patch already applied. Apply only the additive provider/factory/type/documentation hunks from this worktree, reconciling any version differences. Rebuild declarations/runtime output as required by that package's workflow, then extend the existing pnpm patch. Do not replace entire package files or overwrite the existing patch from an unpatched baseline: that could discard prior structured-output or other application changes. No `agent.ts`, `agentcore` transport, dependency versions, package export map, or lockfile was changed here.
+
+After integration, retain existing patch-contract tests and add a Document-side probe using `model.local: { provider: 'canned', cannedResponses: './canned-responses.json' }`. Verify the process cwd/file location in that application and exercise two requests around an atomic file update without a restart.
+
+## Verification
+
+Commands ran from this worktree with Node `v22.23.1` selected through `PATH=/Users/costleya/.nvm/versions/node/v22.23.1/bin:$PATH`.
+
+- `npm run build`: exit 0, 16.10 seconds.
+- `npm run build -w packages/bb-agent`: exit 0.
+- `npm run test -w packages/bb-agent`: unrestricted retry exit 0: 114 index tests, four CDK tests, and one bundle test all passed. The initial restricted run passed 110/114 index tests and failed four existing HTTP health-check tests with socket `EPERM`.
+- `npm run lint`: exit 0.
+- `npm run lint:deps`: unrestricted retry exit 0, 347 source files checked. Restricted `tsx` IPC was denied.
+- `npm test`: final unrestricted, sequential run exit 0, confirmed from the retained process handle. The initial restricted run exited 1 due socket/IPC `EPERM`; the first unrestricted run finished with no `not ok` or npm-error entries but its runner lost the exit handle, so the command was repeated after E2E shutdown.
+- `npm run check:api`: extraction succeeded and generated only the intentional tracked bb-agent API change. Command exit 1 because `scripts/check-api-reports.ts` rejects uncommitted API report differences before its content scan. This is left explicit because committing is outside the authorized scope. The restricted first attempt also hit `tsx` IPC `EPERM`; the unrestricted attempt reached the diff check.
+- `npm run test:e2e:local`: comprehensive tests: 393 tests, 392 passed, one skipped, zero failures, 113.98 seconds. Vendorization: eight passed, zero failed, 42.32 seconds. Full command log duration 157.48 seconds; the runner lost the exit handle, so a numeric wrapper exit was not captured. Harness shutdown and owned server termination were verified.
+- `git diff --check`: passed.
+- Independent read-only review: no actionable findings.
+
+Logs: `/tmp/canned-build.log`, `/tmp/canned-bb-agent-build.log`, `/tmp/canned-bb-agent-test-escalated.log`, `/tmp/canned-lint.log`, `/tmp/canned-lint-deps-escalated.log`, `/tmp/canned-npm-test-escalated.log`, `/tmp/canned-npm-test-final.log`, `/tmp/canned-check-api-escalated.log`, `/tmp/canned-e2e.log`.
+
+An attempted `pnpm exec` tooling check relocated npm-installed dependencies and tried registry access. It was stopped, and the ignored dependency layout was restored without tracked dependency or lockfile changes. Subsequent npm builds and tests used the restored layout.
