@@ -35,6 +35,7 @@ import { cliClientTests } from './cli-client.test.js';
 import { tracerTests } from './tracer.test.js';
 import { metricsTests } from './metrics.test.js';
 import { loggingTests } from './logging.test.js';
+import { __resetConnectionsForTest } from '@aws-blocks/bb-realtime/mock-middleware';
 
 const ENV = process.env.BLOCKS_TEST_ENV || 'local';
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -136,6 +137,10 @@ test.before(async () => {
 });
 
 test.after(async (t) => {
+  if (ENV === 'local') {
+    __resetConnectionsForTest();
+  }
+
   if (server) {
     console.log('\n🛑 Stopping local server...');
     // Kill the entire process group (npm + tsx grandchild)

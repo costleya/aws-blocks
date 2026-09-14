@@ -53,9 +53,10 @@ export function agentTests(getApi: () => typeof apiType) {
         // Subscribe BEFORE sending, await established before stream
         const { channel } = await api.agentGetChannel(conversationId);
         const chunks: any[] = [];
+        let sub: ReturnType<typeof channel.subscribe> | undefined;
         const done = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('No done chunk within 60s')), 60_000);
-          const sub = channel.subscribe((chunk: any) => {
+          sub = channel.subscribe((chunk: any) => {
             chunks.push(chunk);
             if (chunk.type === 'done') { clearTimeout(timer); resolve(); }
           });
@@ -63,9 +64,13 @@ export function agentTests(getApi: () => typeof apiType) {
             .then(() => api.agentStream('Say hello', conversationId, conversationId))
             .catch(reject);
         });
-        await done;
-        assert.ok(chunks.filter((c: any) => c.type === 'text-delta').length > 0, 'should receive text-delta chunks');
-        assert.ok(chunks.some((c: any) => c.type === 'done'), 'should receive done chunk');
+        try {
+          await done;
+          assert.ok(chunks.filter((c: any) => c.type === 'text-delta').length > 0, 'should receive text-delta chunks');
+          assert.ok(chunks.some((c: any) => c.type === 'done'), 'should receive done chunk');
+        } finally {
+          sub?.unsubscribe();
+        }
       });
     });
 
@@ -346,9 +351,10 @@ export function agentTests(getApi: () => typeof apiType) {
         const { channel } = await api.cannedGetChannel(conversationId);
 
         const chunks: any[] = [];
+        let sub: ReturnType<typeof channel.subscribe> | undefined;
         const interrupted = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('No interrupt chunk within 10s')), 10_000);
-          const sub = channel.subscribe((chunk: any) => {
+          sub = channel.subscribe((chunk: any) => {
             chunks.push(chunk);
             if (chunk.type === 'interrupt') { clearTimeout(timer); resolve(); }
           });
@@ -357,11 +363,15 @@ export function agentTests(getApi: () => typeof apiType) {
           }).catch(reject);
         });
 
-        await interrupted;
-        const interruptChunk = chunks.find((c: any) => c.type === 'interrupt');
-        assert.ok(interruptChunk, 'should receive interrupt chunk');
-        assert.ok(interruptChunk.interrupts.length > 0, 'should have pending interrupts');
-        assert.ok(interruptChunk.interrupts[0].name.includes('deleteRecords'), 'interrupt should reference deleteRecords');
+        try {
+          await interrupted;
+          const interruptChunk = chunks.find((c: any) => c.type === 'interrupt');
+          assert.ok(interruptChunk, 'should receive interrupt chunk');
+          assert.ok(interruptChunk.interrupts.length > 0, 'should have pending interrupts');
+          assert.ok(interruptChunk.interrupts[0].name.includes('deleteRecords'), 'interrupt should reference deleteRecords');
+        } finally {
+          sub?.unsubscribe();
+        }
       });
 
       test('resume after approval completes the agent turn', { timeout: 20_000 }, async () => {
@@ -370,9 +380,10 @@ export function agentTests(getApi: () => typeof apiType) {
         const { channel } = await api.cannedGetChannel(conversationId);
 
         const chunks: any[] = [];
+        let sub: ReturnType<typeof channel.subscribe> | undefined;
         const done = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('No done chunk within 15s')), 15_000);
-          const sub = channel.subscribe((chunk: any) => {
+          sub = channel.subscribe((chunk: any) => {
             chunks.push(chunk);
             if (chunk.type === 'done') { clearTimeout(timer); resolve(); }
           });
@@ -387,9 +398,13 @@ export function agentTests(getApi: () => typeof apiType) {
           }).catch(reject);
         });
 
-        await done;
-        assert.ok(chunks.some((c: any) => c.type === 'interrupt'), 'should have received interrupt');
-        assert.ok(chunks.some((c: any) => c.type === 'done'), 'should have received done after resume');
+        try {
+          await done;
+          assert.ok(chunks.some((c: any) => c.type === 'interrupt'), 'should have received interrupt');
+          assert.ok(chunks.some((c: any) => c.type === 'done'), 'should have received done after resume');
+        } finally {
+          sub?.unsubscribe();
+        }
       });
 
       test('approval is persisted to conversation history', { timeout: 20_000 }, async () => {
@@ -397,9 +412,10 @@ export function agentTests(getApi: () => typeof apiType) {
         const { conversationId } = await api.cannedCreateConversationId();
         const { channel } = await api.cannedGetChannel(conversationId);
 
+        let sub: ReturnType<typeof channel.subscribe> | undefined;
         const interruptReceived = new Promise<any>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('No interrupt within 10s')), 10_000);
-          const sub = channel.subscribe((chunk: any) => {
+          sub = channel.subscribe((chunk: any) => {
             if (chunk.type === 'interrupt') { clearTimeout(timer); resolve(chunk); }
           });
           sub.established.then(() => {
@@ -407,15 +423,19 @@ export function agentTests(getApi: () => typeof apiType) {
           }).catch(reject);
         });
 
-        const interruptChunk = await interruptReceived;
-        await api.cannedResume(conversationId, interruptChunk.interrupts.map((i: any) => ({ interruptId: i.id, approved: true })), conversationId);
-        // Wait for agent to complete
-        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const interruptChunk = await interruptReceived;
+          await api.cannedResume(conversationId, interruptChunk.interrupts.map((i: any) => ({ interruptId: i.id, approved: true })), conversationId);
+          // Wait for agent to complete
+          await new Promise(r => setTimeout(r, 2000));
 
-        const { messages } = await api.cannedGetConversation(conversationId);
-        const roles = messages.map((m: any) => m.role);
-        assert.ok(roles.includes('interrupt'), 'should have interrupt message in history');
-        assert.ok(roles.includes('approval'), 'should have approval message in history');
+          const { messages } = await api.cannedGetConversation(conversationId);
+          const roles = messages.map((m: any) => m.role);
+          assert.ok(roles.includes('interrupt'), 'should have interrupt message in history');
+          assert.ok(roles.includes('approval'), 'should have approval message in history');
+        } finally {
+          sub?.unsubscribe();
+        }
       });
 
       test('denial skips tool execution and agent continues', { timeout: 60_000 }, async () => {
@@ -424,9 +444,10 @@ export function agentTests(getApi: () => typeof apiType) {
         const { channel } = await api.cannedGetChannel(conversationId);
 
         const chunks: any[] = [];
+        let sub: ReturnType<typeof channel.subscribe> | undefined;
         const done = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('No done chunk within 15s')), 15_000);
-          const sub = channel.subscribe((chunk: any) => {
+          sub = channel.subscribe((chunk: any) => {
             chunks.push(chunk);
             if (chunk.type === 'done') { clearTimeout(timer); resolve(); }
           });
@@ -440,9 +461,13 @@ export function agentTests(getApi: () => typeof apiType) {
           }).catch(reject);
         });
 
-        await done;
-        assert.ok(chunks.some((c: any) => c.type === 'interrupt'), 'should have received interrupt');
-        assert.ok(chunks.some((c: any) => c.type === 'done'), 'agent should complete after denial');
+        try {
+          await done;
+          assert.ok(chunks.some((c: any) => c.type === 'interrupt'), 'should have received interrupt');
+          assert.ok(chunks.some((c: any) => c.type === 'done'), 'agent should complete after denial');
+        } finally {
+          sub?.unsubscribe();
+        }
         // After denial, conversation history should show the tool was cancelled (not executed successfully)
         const { messages } = await api.cannedGetConversation(conversationId);
         const toolResult = messages.find((m: any) => m.role === 'tool-result');

@@ -576,7 +576,6 @@ describe('CannedProvider', () => {
 		const result = await agent.stream('hello', { userId: 'test-user' });
 		assert.ok(result.channelId);
 		const done = await result.complete();
-		assert.strictEqual(done.type, 'done');
 		assert.ok(done.text && done.text.length > 0, 'should have response text');
 	});
 
@@ -713,7 +712,6 @@ describe('CannedProvider', () => {
 		});
 		const result = await agent.stream('run failingTool', { userId: 'test-user' });
 		const chunk = await result.complete();
-		assert.strictEqual(chunk.type, 'done', 'Strands catches tool errors — stream completes normally');
 		assert.ok(chunk.text && chunk.text.length > 0, 'should have response text');
 	});
 
@@ -814,7 +812,7 @@ describe('runaway protection caps', () => {
 		});
 		const result = await agent.stream('run getStatus', { userId: 'test-user' });
 		const chunk = await result.complete();
-		assert.strictEqual(chunk.type, 'done', 'a normal turn under the default caps should complete');
+		assert.ok(chunk.text.length > 0, 'a normal turn under the default caps should complete');
 	});
 
 	test('a cap set to false is disabled', async () => {
@@ -832,7 +830,7 @@ describe('runaway protection caps', () => {
 		});
 		const result = await agent.stream('run alpha and bravo', { userId: 'test-user' });
 		const chunk = await result.complete();
-		assert.strictEqual(chunk.type, 'done', 'disabling the cap should let the turn complete');
+		assert.ok(chunk.text.length > 0, 'disabling the cap should let the turn complete');
 	});
 
 	test('an invalid cap value is rejected at construction', async () => {
@@ -949,7 +947,7 @@ describe('runaway protection caps', () => {
 		const convId = await agent.createConversationId('test-user');
 
 		const first = await (await agent.stream('what is the weather?', { conversationId: convId, userId: 'test-user' })).complete();
-		assert.strictEqual(first.type, 'done', 'turn 1 should complete');
+		assert.ok(first.text.length > 0, 'turn 1 should complete');
 
 		const second = await agent.stream('what is the weather?', { conversationId: convId, userId: 'test-user' });
 		const chunks: any[] = [];

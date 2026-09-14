@@ -3,6 +3,15 @@
 
 import { AgentErrors, blocksAgentError } from './errors.js';
 
+export type {
+	AgentCompletion,
+	AgentStructuredCompletion,
+	AgentTextCompletion,
+	AgentWorkflow,
+	AgentWorkflowArgs,
+	AgentWorkflowTurn,
+} from './types.js';
+
 export class Agent {
   constructor(..._args: any[]) {
     throw blocksAgentError(AgentErrors.BrowserNotSupported, 'Agent can only be instantiated on the server.');

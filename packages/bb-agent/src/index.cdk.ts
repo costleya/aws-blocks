@@ -1,17 +1,25 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Scope } from '@aws-blocks/core/cdk';
-import type { ScopeParent } from '@aws-blocks/core';
 import { DistributedTable } from '@aws-blocks/bb-distributed-table';
-import { Realtime } from '@aws-blocks/bb-realtime';
 import { FileBucket } from '@aws-blocks/bb-file-bucket';
+import { Realtime } from '@aws-blocks/bb-realtime';
+import type { ScopeParent } from '@aws-blocks/core';
+import { Scope } from '@aws-blocks/core/cdk';
 import { AgentCoreRuntime } from './agentcore-runtime.cdk.js';
-import { messageSchema, conversationSchema, agentStreamChunkSchema } from './schemas.js';
+import { agentStreamChunkSchema, conversationSchema, messageSchema } from './schemas.js';
 import type { AgentConfig } from './types.js';
 
 export { AgentErrors } from './errors.js';
 export { BedrockModels, OllamaModels } from './models.js';
+export type {
+	AgentCompletion,
+	AgentStructuredCompletion,
+	AgentTextCompletion,
+	AgentWorkflow,
+	AgentWorkflowArgs,
+	AgentWorkflowTurn,
+} from './types.js';
 
 export class Agent extends Scope {
 	/**

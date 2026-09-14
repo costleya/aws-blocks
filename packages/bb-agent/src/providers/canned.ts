@@ -122,6 +122,11 @@ function getToolResultText(messages: Message[]): string {
 	return results.join(' | ');
 }
 
+function getSelectedToolName(options?: StreamOptions): string | undefined {
+	const toolChoice = options?.toolChoice as { tool?: { name?: string } } | undefined;
+	return toolChoice?.tool?.name;
+}
+
 /** Sentinel for a property whose shape carries no usable signal (distinct from a legitimate `null`/`0`/`false`). */
 const NO_PLACEHOLDER = Symbol('no-placeholder');
 
@@ -243,6 +248,11 @@ export class CannedProvider extends Model<CannedConfig> {
 		if (hasToolResult(messages)) {
 			const resultText = getToolResultText(messages);
 			yield* this.emitText(`I called the tool. Output: ${resultText} [canned tool response]`);
+			return;
+		}
+		const selectedToolName = getSelectedToolName(options);
+		if (selectedToolName) {
+			yield* this.emitToolCall(selectedToolName, options?.toolSpecs);
 			return;
 		}
 

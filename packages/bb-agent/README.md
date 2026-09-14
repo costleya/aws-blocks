@@ -95,7 +95,11 @@ Returned by `stream()`. Provides the Realtime channel and convenience methods:
 |--------|------|-------------|
 | `channelId` | `string` | Realtime channel where chunks are published. |
 | `channel` | `Promise<RealtimeChannel>` | Realtime channel handle — `await` it, then call `.subscribe(handler)`. |
-| `complete()` | `Promise<AgentStreamChunk>` | Wait for the done chunk (full text + token usage). |
+| `complete()` | `Promise<AgentCompletion>` | Wait for the final response: `{ text, structuredOutput?, usage? }`. Rejects on an error or interrupt. |
+
+`AgentCompletion` is the logical result and has no transport `type` field. Optional fields are omitted when
+undefined; an explicit `null` structured result is retained. `complete()` is server-side only and is dropped
+when the stream result crosses RPC, as before.
 
 ### AgentStreamChunk
 
@@ -106,7 +110,7 @@ Each chunk published to the Realtime channel has a `type` and type-specific fiel
 | `text-delta` | `text: string` | Incremental text token (in `'token'` streaming mode) or full block (in `'block'` mode). |
 | `tool-call` | `toolName: string`, `input: JSONValue` | Agent is calling a tool. |
 | `tool-result` | `toolName: string`, `text: string` | Tool returned a result. |
-| `done` | `text: string`, `usage: TokenUsage` | Agent finished. `text` contains the full response. `usage` has `{ inputTokens, outputTokens, totalTokens }`. |
+| `done` | `text: string`, `structuredOutput?: JSONValue`, `usage?: TokenUsage` | Agent finished. `text` contains the full response. `usage` has `{ inputTokens, outputTokens, totalTokens }` when available. |
 | `error` | `error: string` | Agent encountered an error. |
 | `interrupt` | `interrupts: Array<{ id, name, reason }>` | Agent paused for approval. See [Tool Approval](#tool-approval-human-in-the-loop). |
 
@@ -342,6 +346,63 @@ const agent = new Agent(scope, 'support', {
   ...
 });
 ```
+
+### Native structured output and workflows
+
+Set `structuredOutput` to a Zod schema to forward it to Strands as its native structured-output schema.
+The final result carries `structuredOutput` independently of whether the provider reports token usage.
+Only JSON-safe structured results can cross Realtime: `Date`, `BigInt`, cycles, nested undefined values,
+and non-finite numbers are rejected before publication.
+
+```typescript
+import { Agent } from '@aws-blocks/bb-agent';
+import { Scope } from '@aws-blocks/core';
+import { z } from 'zod';
+
+const scope = new Scope('structured-example');
+const summary = z.object({ title: z.string() });
+const agent = new Agent(scope, 'summary', {
+  inferenceOnly: true,
+  systemPrompt: 'Return a concise summary matching the requested schema.',
+  structuredOutput: summary,
+  maxModelCalls: 2,
+});
+const result = await agent.stream('Summarize this request.', { userId: 'script-user' });
+const completion = await result.complete();
+console.log(completion.structuredOutput);
+```
+
+For several coordinated model turns, use `workflow`. Its `turn(prompt)` helper returns text and optional
+usage; `turn(prompt, { structuredOutput: schema })` also returns a schema-inferred structured result.
+Turns share one Strands agent and run in invocation order, including when scheduled concurrently.
+A failed turn prevents queued turns from calling the model. Await issued turns before throwing from
+the workflow callback: the inherited workflow contract drains the queue after a successful callback,
+but a callback rejection can leave an already issued turn running. The workflow returns its final logical
+completion; final usage comes from the last reported accumulated model usage.
+
+```typescript
+const workflowAgent = new Agent(scope, 'workflow', {
+  inferenceOnly: true,
+  systemPrompt: 'Draft and refine a concise summary.',
+  maxModelCalls: 4,
+  workflow: async ({ input, turn }) => {
+    const draft = await turn(input);
+    const final = await turn(`Summarize: ${draft.text}`, { structuredOutput: summary });
+    return { text: final.structuredOutput.title, structuredOutput: final.structuredOutput };
+  },
+});
+```
+
+Configure structured schemas on workflow turns rather than combining top-level `structuredOutput` with
+`workflow`; that combination is rejected. Workflow `input` and `message` both contain the submitted text,
+and `context` is the resolved tool context. Local canned execution honors a native forced tool choice so
+structured-output extraction can select its schema tool.
+
+`maxModelCalls` is a positive safe integer that throws before an excess model call, including native
+structured-output repair calls and subsequent workflow turns. Setting it replaces the default
+`maxLlmCalls` cap. An explicitly configured `maxLlmCalls` still applies independently, and
+`maxToolIterations` remains active. The throwing guard is counted per invocation; the existing generic
+caps retain their session-persisted budgets across approval resumes.
 
 ### Conversation Management
 

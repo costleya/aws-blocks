@@ -21,6 +21,16 @@ export class Agent<TContext = DefaultToolContext> extends AgentBase<TContext> {
     protected dispatchTurn(payload: AgentTurnPayload<TContext>): Promise<void>;
 }
 
+// @public
+export interface AgentCompletion {
+    // (undocumented)
+    structuredOutput?: JSONValue;
+    // (undocumented)
+    text: string;
+    // (undocumented)
+    usage?: TokenUsage;
+}
+
 // @public (undocumented)
 export interface AgentConfig<TContext = DefaultToolContext> {
     // @internal
@@ -34,6 +44,7 @@ export interface AgentConfig<TContext = DefaultToolContext> {
     inferenceOnly?: boolean;
     logger?: ChildLogger;
     maxLlmCalls?: number | false;
+    maxModelCalls?: number;
     maxToolIterations?: number | false;
     // (undocumented)
     model?: {
@@ -44,10 +55,12 @@ export interface AgentConfig<TContext = DefaultToolContext> {
     name?: string;
     removalPolicy?: 'destroy' | 'retain';
     streamingMode?: 'token' | 'block';
+    structuredOutput?: z.ZodType<JSONValue>;
     // (undocumented)
     systemPrompt: string;
     toolContextSchema?: z.ZodType<TContext>;
     tools?: ToolsConfig<TContext>;
+    workflow?: AgentWorkflow<TContext>;
 }
 
 // @public
@@ -62,6 +75,7 @@ export const AgentErrors: {
 
 // @public (undocumented)
 export interface AgentResult {
+    structuredOutput?: JSONValue;
     // (undocumented)
     text: string;
     // (undocumented)
@@ -82,6 +96,7 @@ export interface AgentStreamChunk {
         name: string;
         reason?: any;
     }>;
+    structuredOutput?: JSONValue;
     // (undocumented)
     text?: string;
     // (undocumented)
@@ -96,11 +111,25 @@ export interface AgentStreamChunk {
 export interface AgentStreamResult {
     channel: Promise<RealtimeChannel<AgentStreamChunk>>;
     channelId: string;
-    complete: () => Promise<AgentStreamChunk>;
+    complete: () => Promise<AgentCompletion>;
     toJSON(): {
         channelId: string;
         channel: null;
     };
+}
+
+// @public
+export interface AgentStructuredCompletion<TSchema extends z.ZodType> extends AgentTextCompletion {
+    // (undocumented)
+    structuredOutput: z.infer<TSchema>;
+}
+
+// @public
+export interface AgentTextCompletion {
+    // (undocumented)
+    text: string;
+    // (undocumented)
+    usage?: TokenUsage;
 }
 
 // @public
@@ -121,6 +150,31 @@ export interface AgentTurnPayload<TContext = DefaultToolContext> {
     }>;
     message: string;
     userId: string;
+}
+
+// @public
+export type AgentWorkflow<TContext = DefaultToolContext> = (args: AgentWorkflowArgs<TContext>) => Promise<AgentCompletion>;
+
+// @public
+export interface AgentWorkflowArgs<TContext = DefaultToolContext> {
+    // (undocumented)
+    context: TContext | undefined;
+    // (undocumented)
+    input: string;
+    // (undocumented)
+    message: string;
+    // (undocumented)
+    turn: AgentWorkflowTurn;
+}
+
+// @public
+export interface AgentWorkflowTurn {
+    // (undocumented)
+    (prompt: string): Promise<AgentTextCompletion>;
+    // (undocumented)
+    <TSchema extends z.ZodType>(prompt: string, options: {
+        structuredOutput: TSchema;
+    }): Promise<AgentStructuredCompletion<TSchema>>;
 }
 
 // @public

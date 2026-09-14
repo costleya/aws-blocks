@@ -1,23 +1,41 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Scope, registerSdkIdentifiers, getSdkIdentifiers } from '@aws-blocks/core';
-import type { ScopeParent } from '@aws-blocks/core';
 import { DistributedTable } from '@aws-blocks/bb-distributed-table';
-import { Realtime } from '@aws-blocks/bb-realtime';
 import { FileBucket } from '@aws-blocks/bb-file-bucket';
-import { Logger } from '@aws-blocks/bb-logger';
 import type { ChildLogger } from '@aws-blocks/bb-logger';
+import { Logger } from '@aws-blocks/bb-logger';
+import { Realtime } from '@aws-blocks/bb-realtime';
+import type { ScopeParent } from '@aws-blocks/core';
+import { getSdkIdentifiers, registerSdkIdentifiers, Scope } from '@aws-blocks/core';
 // Runtime values from `@strands-agents/sdk` are deferred to loadStrands(); only types
 // are imported here (erased at compile time). See loadStrands() / issue #153.
-import type { Agent as StrandsAgent, SnapshotStorage } from '@strands-agents/sdk';
-import type { z } from 'zod';
-import { createStrandsModel, checkModelHealth } from './model-factory.js';
-import { messageSchema, conversationSchema, agentStreamChunkSchema } from './schemas.js';
-import type { AgentConfig, AgentStreamChunk, AgentStreamResult, StreamOptions, Message, Conversation, TokenUsage, ConversationManagerConfig, ModelConfig, JSONValue, InterruptResponse, DefaultToolContext, AgentTool, ToolDefinition, CannedToolHints } from './types.js';
-import { AgentErrors, blocksAgentError, InterruptError } from './errors.js';
-import { BB_NAME, BB_VERSION } from './version.js';
+import type { SnapshotStorage, Agent as StrandsAgent } from '@strands-agents/sdk';
 import { ulid } from 'ulid';
+import type { z } from 'zod';
+import { AgentErrors, blocksAgentError, InterruptError } from './errors.js';
+import { checkModelHealth, createStrandsModel } from './model-factory.js';
+import { agentStreamChunkSchema, conversationSchema, jsonValueSchema, messageSchema } from './schemas.js';
+import type {
+	AgentCompletion,
+	AgentConfig,
+	AgentStreamChunk,
+	AgentStreamResult,
+	AgentTool,
+	AgentWorkflowTurn,
+	CannedToolHints,
+	Conversation,
+	ConversationManagerConfig,
+	DefaultToolContext,
+	InterruptResponse,
+	JSONValue,
+	Message,
+	ModelConfig,
+	StreamOptions,
+	TokenUsage,
+	ToolDefinition,
+} from './types.js';
+import { BB_NAME, BB_VERSION } from './version.js';
 
 /**
  * A single agent turn to dispatch (initial message or HITL resume). Passed to
@@ -203,6 +221,12 @@ export class AgentBase<TContext = DefaultToolContext> extends Scope {
 	 */
 	constructor(scope: ScopeParent, id: string, config: AgentConfig<TContext>, modelConfig: ModelConfig | ModelConfig[] | undefined, createSnapshotStorage: (bucket: FileBucket) => SnapshotStorage) {
 		super(id, { parent: scope, bbName: BB_NAME, bbVersion: BB_VERSION });
+		if (config.maxModelCalls !== undefined && (!Number.isSafeInteger(config.maxModelCalls) || config.maxModelCalls < 1)) {
+			throw blocksAgentError(AgentErrors.InvalidModelConfig, "'maxModelCalls' must be a positive integer.");
+		}
+		if (config.workflow !== undefined && config.structuredOutput !== undefined) {
+			throw blocksAgentError(AgentErrors.InvalidModelConfig, "'workflow' and 'structuredOutput' cannot both be configured. Define structured output on workflow turns instead.");
+		}
 		this.log = config?.logger ?? new Logger(this, 'logger', { level: 'error' });
 		this.config = config;
 		validateCap('maxLlmCalls', config.maxLlmCalls);
@@ -317,7 +341,7 @@ export class AgentBase<TContext = DefaultToolContext> extends Scope {
 	 */
 	private async runAgent(message: string, conversationId: string | undefined, channelId: string, userId: string, interruptResponses?: Array<{ interruptId: string; response: string }>, context?: TContext): Promise<void> {
 		const { InterruptResponseContent, ModelStreamUpdateEvent, BeforeModelCallEvent, BeforeToolCallEvent, AfterToolCallEvent, AgentResultEvent } = await loadStrands();
-		const strandsAgent = await this.createStrandsAgent(conversationId, context);
+		const strandsAgent = await this.createStrandsAgent(conversationId, context, this.config.workflow === undefined);
 		const startTime = Date.now();
 
 		// Runaway-protection caps (see AgentConfig.maxLlmCalls / maxToolIterations).
@@ -362,7 +386,10 @@ export class AgentBase<TContext = DefaultToolContext> extends Scope {
 		};
 		// `false` disables a cap (→ Infinity, never trips); undefined uses the default.
 		// Values are validated in the constructor (positive integer or false).
-		const maxLlmConfig = this.config.maxLlmCalls ?? DEFAULT_MAX_LLM_CALLS;
+		// maxModelCalls predates maxLlmCalls and rejects the invocation; it must not
+		// inherit the new cancellation-based default cap. An explicit maxLlmCalls is
+		// still enforced alongside the legacy limit.
+		const maxLlmConfig = this.config.maxLlmCalls ?? (this.config.maxModelCalls === undefined ? DEFAULT_MAX_LLM_CALLS : false);
 		const maxToolsConfig = this.config.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
 		const maxLlm = maxLlmConfig === false ? Number.POSITIVE_INFINITY : maxLlmConfig;
 		const maxTools = maxToolsConfig === false ? Number.POSITIVE_INFINITY : maxToolsConfig;
@@ -384,14 +411,58 @@ export class AgentBase<TContext = DefaultToolContext> extends Scope {
 				strandsAgent.cancel();
 			}
 		});
+		const maxModelCalls = this.config.maxModelCalls;
+		if (maxModelCalls !== undefined) {
+			let legacyModelCallCount = 0;
+			strandsAgent.addHook(BeforeModelCallEvent, () => {
+				legacyModelCallCount += 1;
+				if (legacyModelCallCount > maxModelCalls) {
+					throw blocksAgentError(AgentErrors.StreamFailed, `Agent model call limit of ${maxModelCalls} exceeded`);
+				}
+			});
+		}
+		const stopForCap = async (content: string) => {
+			if (!capExceeded) return false;
+			const latencyMs = Date.now() - startTime;
+			const stoppedError = `Agent stopped: ${capExceeded}.`;
+			this.log.warn('runAgent stopped by cap', {
+				reason: capExceeded,
+				modelCallCount: Number(strandsAgent.appState.get(MODEL_CALL_COUNT_KEY)) || 0,
+				toolCallCount: Number(strandsAgent.appState.get(TOOL_CALL_COUNT_KEY)) || 0,
+			});
+			if (conversationId && this.messages) {
+				await this.messages.put({ conversationId, messageId: ulid(), role: 'assistant' as const, content, contentType: 'text' as const, userId, createdAt: Date.now(), metadata: JSON.stringify({ error: stoppedError, latencyMs }) });
+			}
+			await this.rt.publish('chunks', channelId, { type: 'error', error: stoppedError });
+			return true;
+		};
 
 		// Only persist user message on initial path (not resume)
 		if (!interruptResponses && conversationId && this.messages) {
 			await this.messages.put({ conversationId, messageId: ulid(), role: 'user' as const, content: message, contentType: 'text' as const, userId, createdAt: Date.now(), metadata: '{}' });
 		}
 
+		if (this.config.workflow) {
+			let completion: AgentCompletion;
+			try {
+				completion = await this.runWorkflow(strandsAgent, message, context);
+			} catch (error) {
+				if (await stopForCap('')) return;
+				throw error;
+			}
+			if (await stopForCap(completion.text)) return;
+			const structuredOutput = completion.structuredOutput === undefined ? undefined : jsonValueSchema.parse(completion.structuredOutput);
+			const latencyMs = Date.now() - startTime;
+			if (conversationId && this.messages) {
+				await this.messages.put({ conversationId, messageId: ulid(), role: 'assistant' as const, content: completion.text, contentType: 'text' as const, userId, createdAt: Date.now(), metadata: JSON.stringify({ usage: completion.usage, latencyMs }) });
+			}
+			await this.rt.publish('chunks', channelId, { type: 'done', text: completion.text, ...(structuredOutput === undefined ? {} : { structuredOutput }), ...(completion.usage === undefined ? {} : { usage: completion.usage }) });
+			return;
+		}
+
 		let fullText = '';
 		let usage: TokenUsage | undefined;
+		let structuredOutput: JSONValue | undefined;
 		let blockBuffer = '';
 		let interrupted = false;
 		const isBlockMode = this.config.streamingMode !== 'token';
@@ -432,6 +503,7 @@ export class AgentBase<TContext = DefaultToolContext> extends Scope {
 				} else if (event instanceof AgentResultEvent) {
 					const u = event.result.metrics?.toJSON()?.accumulatedUsage;
 					if (u) usage = { inputTokens: u.inputTokens, outputTokens: u.outputTokens, totalTokens: u.totalTokens };
+					if (event.result.structuredOutput !== undefined) structuredOutput = jsonValueSchema.parse(event.result.structuredOutput);
 					// Check if agent was interrupted
 					if (event.result.stopReason === 'interrupt' && event.result.interrupts?.length) {
 						interrupted = true;
@@ -473,25 +545,7 @@ export class AgentBase<TContext = DefaultToolContext> extends Scope {
 		// Cancellation ends the stream normally (no throw, stopReason 'cancelled'), and
 		// `capExceeded` is only ever set by the cap hooks above — so surface it as an
 		// error chunk and skip the final persist + 'done' below.
-		if (capExceeded) {
-			const stoppedError = `Agent stopped: ${capExceeded}.`;
-			this.log.warn('runAgent stopped by cap', {
-				reason: capExceeded,
-				modelCallCount: Number(strandsAgent.appState.get(MODEL_CALL_COUNT_KEY)) || 0,
-				toolCallCount: Number(strandsAgent.appState.get(TOOL_CALL_COUNT_KEY)) || 0,
-			});
-			if (conversationId && this.messages) {
-				// Record why the turn stopped, mirroring the AsyncJob error handler — a
-				// reloaded conversation would otherwise just end without explanation.
-				// The cancelled tool call itself stays paired: Strands still emits
-				// AfterToolCallEvent for a call cancelled via `event.cancel` (carrying the
-				// cancellation as the result), which the loop above persists as
-				// 'tool-result', so no dangling tool_use is left behind for the next turn.
-				await this.messages.put({ conversationId, messageId: ulid(), role: 'assistant' as const, content: fullText, contentType: 'text' as const, userId, createdAt: Date.now(), metadata: JSON.stringify({ error: stoppedError, latencyMs }) });
-			}
-			await this.rt.publish('chunks', channelId, { type: 'error', error: stoppedError });
-			return;
-		}
+		if (await stopForCap(fullText)) return;
 
 		// If interrupted, don't persist final message or publish done — agent is paused
 		if (interrupted) return;
@@ -508,10 +562,49 @@ export class AgentBase<TContext = DefaultToolContext> extends Scope {
 			}
 		}
 
-		await this.rt.publish('chunks', channelId, { type: 'done', text: fullText, usage });
+		await this.rt.publish('chunks', channelId, { type: 'done', text: fullText, ...(structuredOutput === undefined ? {} : { structuredOutput }), usage });
 	}
 
-	private async createStrandsAgent(conversationId?: string, fallbackContext?: TContext): Promise<StrandsAgent> {
+	private async runWorkflow(strandsAgent: StrandsAgent, message: string, context: TContext | undefined): Promise<AgentCompletion> {
+		const workflow = this.config.workflow;
+		if (workflow === undefined) throw blocksAgentError(AgentErrors.InvalidModelConfig, 'Agent workflow is not configured.');
+		const { AgentResultEvent, ModelStreamUpdateEvent } = await loadStrands();
+		const invocationState = { [TOOL_CONTEXT_KEY]: context ?? {} };
+		let usage: TokenUsage | undefined;
+		let queue = Promise.resolve();
+		let firstFailure: unknown;
+		const runTurn = async <TSchema extends z.ZodType>(prompt: string, options?: { structuredOutput: TSchema }): Promise<any> => {
+			let text = '';
+			let structuredOutput: unknown;
+			for await (const event of strandsAgent.stream(prompt, { invocationState, ...(options?.structuredOutput === undefined ? {} : { structuredOutputSchema: options.structuredOutput }) })) {
+				if (event instanceof ModelStreamUpdateEvent && event.event.type === 'modelContentBlockDeltaEvent' && event.event.delta.type === 'textDelta') text += event.event.delta.text;
+				if (event instanceof AgentResultEvent) {
+					const resultUsage = event.result.metrics?.toJSON()?.accumulatedUsage;
+					if (resultUsage) usage = { inputTokens: resultUsage.inputTokens, outputTokens: resultUsage.outputTokens, totalTokens: resultUsage.totalTokens };
+					structuredOutput = event.result.structuredOutput;
+				}
+			}
+			if (options?.structuredOutput !== undefined) {
+				if (structuredOutput === undefined) throw blocksAgentError(AgentErrors.StreamFailed, 'Agent workflow turn did not return structured output.');
+				return { text, structuredOutput: options.structuredOutput.parse(structuredOutput), ...(usage === undefined ? {} : { usage }) };
+			}
+			return { text, ...(usage === undefined ? {} : { usage }) };
+		};
+		const turn = ((prompt: string, options?: { structuredOutput: z.ZodType }) => {
+			const result = queue.then(async () => {
+				if (firstFailure !== undefined) throw firstFailure;
+				return await runTurn(prompt, options);
+			});
+			queue = result.then(() => undefined, (error) => { firstFailure ??= error; });
+			return result;
+		}) as AgentWorkflowTurn;
+		const completion = await workflow({ input: message, message, context, turn });
+		await queue;
+		if (firstFailure !== undefined) throw firstFailure;
+		return { text: completion.text, ...(completion.structuredOutput === undefined ? {} : { structuredOutput: completion.structuredOutput }), ...(usage === undefined ? {} : { usage }) };
+	}
+
+	private async createStrandsAgent(conversationId?: string, fallbackContext?: TContext, useConfiguredStructuredOutput = true): Promise<StrandsAgent> {
 		const { Agent: StrandsAgent, tool, SessionManager, BeforeToolCallEvent } = await loadStrands();
 		const toolDefs = [...this.toolMap.values()];
 		// Validate mutual exclusivity of needsApproval/trustable and interrupt
@@ -577,6 +670,7 @@ export class AgentBase<TContext = DefaultToolContext> extends Scope {
 			...(this.config.description !== undefined && { description: this.config.description }),
 			systemPrompt: this.config.systemPrompt,
 			tools: strandsTools,
+			...(useConfiguredStructuredOutput && this.config.structuredOutput !== undefined && { structuredOutputSchema: this.config.structuredOutput }),
 			conversationManager: await createConversationManager(this.config.conversation),
 			sessionManager,
 			printer: false, //disable Strands automatic printing
@@ -644,13 +738,13 @@ export class AgentBase<TContext = DefaultToolContext> extends Scope {
 			channelId,
 			/** Realtime channel handle — subscribe to streaming chunks or return to client as Transferable. */
 			channel: this.rt.getChannel('chunks', channelId),
-			/** Wait for the complete response (server-side). Resolves on done, rejects on error. */
-			complete: () => new Promise<AgentStreamChunk>((resolve, reject) => {
+			/** Wait for the logical completion (server-side). Resolves on done, rejects on error. */
+			complete: () => new Promise<AgentCompletion>((resolve, reject) => {
 				const unsub = this.rt.subscribe('chunks', channelId, (data) => {
 					const chunk = data as AgentStreamChunk;
 					if (chunk.type === 'done') {
 						unsub();
-						resolve(chunk);
+					resolve({ text: chunk.text ?? '', ...(chunk.structuredOutput === undefined ? {} : { structuredOutput: chunk.structuredOutput }), ...(chunk.usage === undefined ? {} : { usage: chunk.usage }) });
 					} else if (chunk.type === 'error') {
 						unsub();
 						reject(blocksAgentError(AgentErrors.StreamFailed, chunk.error ?? 'Agent error'));

@@ -45,6 +45,28 @@ per-invocation limit or API Gateway's ~29s cap.
 grants, the container env, and the handler's invoke permission — so it can later fold into a per-BB
 compute abstraction (should one land) without touching call sites.
 
+## Structured results and workflows
+
+The Agent configuration forwards `structuredOutput` directly to the Strands native
+`structuredOutputSchema` option. `AgentResultEvent` supplies the structured result, independently of
+usage metrics. A strict JSON boundary validates it before the final Realtime `done` chunk. Server-side
+`complete()` projects that transport chunk into `{ text, structuredOutput?, usage? }`, preserving null
+and omitting undefined fields. RPC serialization still drops the completion function.
+
+A configured workflow receives an invocation-ordered `turn` helper using the same Strands agent and
+tool context. Each structured turn forwards its own schema and parses the native result with it.
+After a successful workflow callback, the queue drains before final completion; its first turn failure
+stops subsequent queued model calls. The inherited patch does not drain issued turns when the workflow
+callback itself throws, so callers should await issued turns before throwing.
+The final workflow result is validated at the same JSON transport boundary.
+
+`maxModelCalls` preserves the dependency patch's throwing pre-provider guard. It replaces only the
+generic default model cap; explicit `maxLlmCalls` and tool caps remain independent. It is counted
+within an invocation, whereas the existing generic cap counters remain session-persisted.
+
+Realtime's message-size contract belongs to `bb-realtime`. The separate Document 128 KiB transport
+patch is not supplied by this Agent extension; the current Realtime dependency limit still applies.
+
 ## Session Persistence
 
 Two storage backends, same FileBucket BB:

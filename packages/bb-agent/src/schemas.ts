@@ -2,6 +2,31 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { z } from 'zod';
+import type { JSONValue } from './types.js';
+
+/** Runtime boundary for values that can safely cross the Realtime JSON transport. */
+const isJsonValue = (value: unknown, ancestors = new Set<object>()): value is JSONValue => {
+	if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+	if (typeof value === 'number') return Number.isFinite(value);
+	if (typeof value !== 'object') return false;
+	if (ancestors.has(value)) return false;
+
+	ancestors.add(value);
+	try {
+		if (Array.isArray(value)) {
+			for (let index = 0; index < value.length; index += 1) {
+				if (!isJsonValue(value[index], ancestors)) return false;
+			}
+			return true;
+		}
+		if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
+		return Object.values(value).every((child) => isJsonValue(child, ancestors));
+	} finally {
+		ancestors.delete(value);
+	}
+};
+
+export const jsonValueSchema: z.ZodType<JSONValue> = z.custom<JSONValue>(isJsonValue);
 
 /** Schema for conversation metadata stored in DistributedTable (Table 1). */
 export const conversationSchema = z.object({
@@ -30,6 +55,7 @@ export const agentStreamChunkSchema = z.object({
 	text: z.string().optional(),
 	toolName: z.string().optional(),
 	input: z.any().optional(),
+	structuredOutput: jsonValueSchema.optional(),
 	error: z.string().optional(),
 	interrupts: z.array(z.object({ id: z.string(), name: z.string(), reason: z.any().optional() })).optional(),
 	usage: z.object({

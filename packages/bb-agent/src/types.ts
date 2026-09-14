@@ -1,9 +1,9 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { z } from 'zod';
-import type { RealtimeChannel } from '@aws-blocks/bb-realtime';
 import type { ChildLogger } from '@aws-blocks/bb-logger';
+import type { RealtimeChannel } from '@aws-blocks/bb-realtime';
+import type { z } from 'zod';
 
 /** Any JSON-serializable value. */
 export type JSONValue = string | number | boolean | null | { [key: string]: JSONValue } | JSONValue[];
@@ -41,6 +41,39 @@ export interface GuardrailsConfig {
  * Tools receive this (optional) object carrying request-scoped data passed via `stream`/`resume`.
  */
 export type DefaultToolContext = Record<string, any>;
+
+/** The logical result of a workflow turn that produces text. */
+export interface AgentTextCompletion {
+	text: string;
+	usage?: TokenUsage;
+}
+
+/** The logical result of a workflow turn that requests schema-validated structured output. */
+export interface AgentStructuredCompletion<TSchema extends z.ZodType> extends AgentTextCompletion {
+	structuredOutput: z.infer<TSchema>;
+}
+
+/** Serializes workflow turn requests so each turn completes before the next starts. */
+export interface AgentWorkflowTurn {
+	(prompt: string): Promise<AgentTextCompletion>;
+	<TSchema extends z.ZodType>(
+		prompt: string,
+		options: { structuredOutput: TSchema },
+	): Promise<AgentStructuredCompletion<TSchema>>;
+}
+
+/** Inputs passed to a custom multi-turn agent workflow. */
+export interface AgentWorkflowArgs<TContext = DefaultToolContext> {
+	input: string;
+	message: string;
+	context: TContext | undefined;
+	turn: AgentWorkflowTurn;
+}
+
+/** Custom multi-turn orchestration that returns one logical agent completion. */
+export type AgentWorkflow<TContext = DefaultToolContext> = (
+	args: AgentWorkflowArgs<TContext>,
+) => Promise<AgentCompletion>;
 
 export interface AgentConfig<TContext = DefaultToolContext> {
 	/**
@@ -85,6 +118,21 @@ export interface AgentConfig<TContext = DefaultToolContext> {
 	 */
 	toolContextSchema?: z.ZodType<TContext>;
 	conversation?: ConversationManagerConfig;
+	/**
+	 * Optional custom multi-turn orchestration. Each call to `turn` is serialized so
+	 * workflow turns cannot concurrently mutate the underlying Strands session.
+	 */
+	workflow?: AgentWorkflow<TContext>;
+	/**
+	 * Optional schema forwarded natively to Strands for the final agent result.
+	 * Cannot be combined with `workflow`; workflow turns declare their own schema.
+	 */
+	structuredOutput?: z.ZodType<JSONValue>;
+	/**
+	 * Legacy hard limit on model invocations per turn. Must be a positive safe integer.
+	 * The over-limit invocation throws before reaching the model provider.
+	 */
+	maxModelCalls?: number;
 	/**
 	 * Safety cap on the number of **model (Bedrock) invocations per turn**.
 	 *
@@ -295,6 +343,15 @@ export type ToolsConfig<TContext = DefaultToolContext> = (
 export interface AgentResult {
 	text: string;
 	toolCalls: ToolCallRecord[];
+	/** Structured output returned by Strands when the agent declares `structuredOutput`. */
+	structuredOutput?: JSONValue;
+	usage?: TokenUsage;
+}
+
+/** Final logical completion returned by `AgentStreamResult.complete()`. */
+export interface AgentCompletion {
+	text: string;
+	structuredOutput?: JSONValue;
 	usage?: TokenUsage;
 }
 
@@ -347,8 +404,8 @@ export interface AgentStreamResult {
 	 * channel from `channelId` via the `useChat` `subscribe` callback.
 	 */
 	channel: Promise<RealtimeChannel<AgentStreamChunk>>;
-	/** Wait for the complete response (server-side). Resolves when the done chunk arrives. */
-	complete: () => Promise<AgentStreamChunk>;
+	/** Wait for the logical completion (server-side). Resolves when the done chunk arrives. */
+	complete: () => Promise<AgentCompletion>;
 	/** Only `{ channelId, channel: null }` is serialized when this object crosses the RPC boundary. */
 	toJSON(): { channelId: string; channel: null };
 }
@@ -358,6 +415,8 @@ export interface AgentStreamChunk {
 	text?: string;
 	toolName?: string;
 	input?: JSONValue;
+	/** Schema-validated structured output delivered with the final `done` transport chunk. */
+	structuredOutput?: JSONValue;
 	usage?: TokenUsage;
 	error?: string;
 	interrupts?: Array<{ id: string; name: string; reason?: any }>;
