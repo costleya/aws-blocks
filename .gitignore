@@ -115,3 +115,6 @@ native/swift/Demo/typescript-demo/package-lock.json
 .agents/skills/*
 !.agents/skills/lgtm/
 !.agents/skills/lgtm/**
+
+.serena/
+.grepai/
