@@ -63,7 +63,7 @@ function matchResponse(prompt: string, customResponses?: Record<string, string>)
 /** Match a custom phrase without retaining patterns for user-provided dictionary keys. */
 function promptMentionsCustomPhrase(lowerPrompt: string, phrase: string): boolean {
 	const escaped = phrase.trim().toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-	return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'u').test(lowerPrompt);
+	return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'iu').test(lowerPrompt);
 }
 
 /** Validate the parsed dictionary before using it to select a response. */

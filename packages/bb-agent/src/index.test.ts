@@ -698,6 +698,17 @@ describe('CannedProvider', () => {
 		assert.strictEqual(done.text, 'Welcome, Ada.');
 	});
 
+	test('Agent matches sigma canned responses without customer casts', async () => {
+		const scope = new Scope('test-canned-sigma-response');
+		const agent = new Agent(scope, 'sigma-response', {
+			inferenceOnly: true,
+			systemPrompt: 'test',
+			model: { local: { provider: 'canned', cannedResponses: { 'ς': 'matched' } } },
+		});
+		const completion = await agent.stream('Σ', { userId: 'test-user' });
+		assert.strictEqual((await completion.complete()).text, 'matched');
+	});
+
 	test('Agent preserves an empty configured canned response', async () => {
 		const agent = new Agent(new Scope('test-canned-empty-response'), 'empty-response', {
 			inferenceOnly: true,

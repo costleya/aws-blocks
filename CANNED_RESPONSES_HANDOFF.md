@@ -2,7 +2,7 @@
 
 Worktree: `/Users/costleya/.codex/worktrees/cd16/aws-blocks`
 
-Starting HEAD: `1c05d70b4cc67f2a26e7a63726ff383e1f3a6467`, identical to `my-main` at inspection. Implementation and verification completed before the user subsequently requested branch creation and a local commit. The branch is `codex/canned-response-dictionaries`. No push, merge, deployment, or Document edits were performed.
+Starting HEAD: `1c05d70b4cc67f2a26e7a63726ff383e1f3a6467`, identical to `my-main` at inspection. Implementation and verification completed before the user subsequently requested branch creation, a local commit, and push. The branch is `codex/canned-response-dictionaries`; commit `20f1112` was pushed to origin. The subsequent sigma correction below is local and uncommitted. No merge, deployment, or Document edits were performed.
 
 The user-requested upstream `packages/bb-agent/src/providers/canned.ts` was retrieved from GitHub's raw main source and compared before implementation; it was identical to the starting local provider.
 
@@ -48,3 +48,23 @@ Commands ran from this worktree with Node `v22.23.1` selected through `PATH=/Use
 Logs: `/tmp/canned-build.log`, `/tmp/canned-bb-agent-build.log`, `/tmp/canned-bb-agent-test-escalated.log`, `/tmp/canned-lint.log`, `/tmp/canned-lint-deps-escalated.log`, `/tmp/canned-npm-test-escalated.log`, `/tmp/canned-npm-test-final.log`, `/tmp/canned-check-api-escalated.log`, `/tmp/canned-e2e.log`.
 
 An attempted `pnpm exec` tooling check relocated npm-installed dependencies and tried registry access. It was stopped, and the ignored dependency layout was restored without tracked dependency or lockfile changes. Subsequent npm builds and tests used the restored layout.
+
+## Follow-up: Greek sigma case equivalence
+
+Document integration review identified that lowercasing with custom regex flag `u` missed equivalent Greek sigma forms: dictionary `{'ς':'matched'}` with prompt `'Σ'` received the generic fallback. The bounded correction changes only the custom matcher flags to `iu`, enabling Unicode case-insensitive matching. Tool matching, built-in response matching, and normalization behavior remain unchanged. A public Agent regression checks that exact dictionary/prompt combination. The Document task reports that its combined existing pnpm patch already contains the same correction; this worktree does not modify that patch or Document.
+
+The package build regenerated `dist/providers/canned.js` with `iu` and `dist/index.test.js` with the public regression. Declaration/map outputs were processed by the normal build; there is no public declaration or API-report change from this flag correction.
+
+Verification under Node `v22.23.1`:
+
+- RED: `npm run build -w packages/bb-agent` exited 0; `node --test --test-name-pattern='sigma' packages/bb-agent/dist/index.test.js` exited 1 before the fix, with expected `matched` and actual generic fallback.
+- GREEN: `npm run build` exited 0; the same focused sigma command exited 0 (one test passed).
+- `npm run test -w packages/bb-agent` unrestricted retry exited 0: 115 runtime tests, four CDK tests, and one bundle test passed.
+- `npm run lint` exited 0 with non-blocking warnings.
+- `npm run lint:deps` unrestricted retry exited 0; 347 files checked.
+- `npm test` unrestricted retry exited 0.
+- `npm run check:api` unrestricted retry exited 0; reports are up to date, with non-blocking API Extractor warnings. Unlike the pre-commit implementation check above, this correction introduces no report diff.
+- `npm run test:e2e:local` exited 0: 393 comprehensive tests, 392 passed, one skipped, zero failed; all eight vendorization tests passed.
+- `git diff --check` passed. Owned E2E processes were checked after completion; no remaining owned test server was found.
+
+Restricted runs of socket/IPC-using checks encountered `EPERM` and were retried with local test network permissions. Logs are under `/tmp/sigma-build.log`, `/tmp/sigma-focused.log`, `/tmp/sigma-bb-agent-test-escalated.log`, `/tmp/sigma-lint.log`, `/tmp/sigma-lint-deps-escalated.log`, `/tmp/sigma-npm-test-escalated.log`, `/tmp/sigma-check-api-escalated.log`, and `/tmp/sigma-e2e-local.log`. Commit `20f1112` remains unchanged and synced to origin; this correction is uncommitted and was not pushed.
