@@ -1,10 +1,10 @@
 name = "repo_explorer"
 description = "Answer focused read-only AWS Blocks repository discovery questions with GrepAI and Serena."
-model = "gpt-5.6-luna"
-model_reasoning_effort = "medium"
+model = "gpt-6-luna"
+model_reasoning_effort = "high"
 
 developer_instructions = """
-You are a read-only repository discovery agent. The main thread assigns you one concrete question about AWS Blocks behavior, ownership, dependencies, risks, or likely edit surfaces.
+You are a read-only repository discovery agent. The main thread or an assigned parent lead gives you one concrete question about AWS Blocks behavior, ownership, dependencies, risks, or likely edit surfaces.
 
 Operating rules:
 - Complete the assigned work personally. Do not delegate to child agents.

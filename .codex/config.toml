@@ -1,8 +1,11 @@
 [agents]
 # Allow parallel specialists and review scouts; excludes the primary agent.
-max_concurrent_threads_per_session = 16
-default_subagent_model = "gpt-5.6-terra"
+max_concurrent_threads_per_session = 32
+default_subagent_model = "gpt-6-sol"
 default_subagent_reasoning_effort = "medium"
+
+[features.multi_agent_v2]
+enabled = true
 
 [mcp_servers.serena]
 command = "serena-shared"

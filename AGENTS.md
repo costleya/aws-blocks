@@ -47,15 +47,16 @@ Use the main thread as coordinator, synthesis owner, and final acceptance owner.
 independent repository discovery, external research, production changes, test changes, integrated verification, and
 review when those scopes have stable boundaries. Handle genuinely small, single-owner work directly.
 
-| Role                 | Use it for                                                                                                                    |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `repo_explorer`      | Unfamiliar repository behavior, package relationships, risks, and likely edit surfaces.                                       |
-| `researcher`         | Current external documentation, AWS guidance, regional availability, and source-backed decisions.                             |
-| `repo_implementer`   | Production code and substantial framework or infrastructure changes.                                                          |
-| `test_implementer`   | `node:test`, parity, CDK, and comprehensive E2E coverage without production edits.                                            |
-| `test_runner`        | Post-integration command execution and evidence after every writer finishes.                                                  |
-| `code_reviewer`      | Routine independent review at Sol Medium before acceptance.                                                                   |
-| `code_reviewer_deep` | Materially high-risk authorization, concurrency, persistence-consistency, streaming, or architectural review at Astra Medium. |
+| Role                    | Use it for                                                                                                                                                                                                                               |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repo_explorer`         | Unfamiliar repository behavior, package relationships, risks, and likely edit surfaces.                                                                                                                                                  |
+| `researcher`            | Current external documentation, AWS guidance, regional availability, and source-backed decisions.                                                                                                                                        |
+| `repo_implementer`      | Production and infrastructure lead; implements and integrates optional bounded children.                                                                                                                                                 |
+| `test_implementer`      | `node:test`, parity, CDK, and comprehensive E2E lead without production edits.                                                                                                                                                           |
+| `implementation_worker` | Bounded production or test edits assigned by a lead; no delegation.                                                                                                                                                                      |
+| `test_runner`           | Post-integration command execution and evidence after every writer finishes.                                                                                                                                                             |
+| `code_reviewer`         | Routine independent review before acceptance.                                                                                                                                                                                            |
+| `code_reviewer_deep`    | Use when a defect could cause serious harm or correctness depends on subtle interactions across components. Examples include authorization boundaries, data loss, race conditions, and recovery behavior. Otherwise use `code_reviewer`. |
 
 Prefer the configured `researcher` for external technology research. It checks relevant first-party documentation
 tools first, uses AWS knowledge tools for AWS questions, and falls back through Context7 to public web sources. The
@@ -63,8 +64,10 @@ main thread may continue independent repository work while research runs and sho
 
 Workflow rules:
 
-1. Give every assignment an outcome, acceptance criteria, public contract, owned files or symbols, constraints, and
-   expected evidence. Use `fork_turns = "none"` with a self-contained prompt for configured specialist roles.
+1. Give every assignment an outcome, acceptance criteria, public contract, owned files or symbols, constraints,
+   permitted checks, and expected evidence. Explicitly set `fork_turns`, defaulting to `"none"`. A positive recent-turn
+   count is appropriate only when that context materially helps; independent test authoring and review use `"none"`.
+   Every prompt must stand alone even with a partial fork. The spawning parent owns this choice.
 2. Use multiple agents only for stable, non-overlapping scopes. No two writers own the same file or symbol unless
    the assignment explicitly requests competing alternatives.
 3. For a bug, sequence the work: a `test_implementer` first adds and confirms the failing repro, then a
@@ -78,14 +81,47 @@ Workflow rules:
    blocker. Return review, lint, formatting, build, and focused-test fallout to that owner with `followup_task`; it
    remains unfinished work. Use a fresh agent for a genuinely new bounded deliverable, stable test layer, material
    architectural pivot, or role-boundary transition, with a concise standalone handoff.
-6. Wait for every writer before final verification. Use one `test_runner` for the integrated gate; it reports defects
-   and does not repair them.
-7. Send non-trivial integrated changes to one `code_reviewer` by default. Use `code_reviewer_deep` instead for
-   materially high-risk authorization, concurrency, persistence-consistency, streaming, or architectural work; do
-   not automatically use both. Add another reviewer only for a clearly disjoint risk domain. Route corrections back
-   to the same reviewer for confirmation; compaction alone is not a reason to replace that reviewer.
+6. Wait for every writer and descendant, then review the integrated change before running the expensive full gate.
+   Use focused tests and relevant build/lint checks during development; a full regression run is not a prerequisite
+   for independent review. Supply available evidence and identify checks deferred until after review.
+7. Send non-trivial integrated changes to one `code_reviewer` by default. Use `code_reviewer_deep` instead when
+   the risk threshold in the role table applies; do not automatically use both. Add another reviewer only for a clearly disjoint risk domain. Route corrections back
+   to the same reviewer for confirmation; compaction alone is not a reason to replace that reviewer. Resolve findings
+   with focused verification before the full gate. Once review is clear, use one `test_runner` for remaining required
+   integrated checks; it reports failures without repairing them. If that gate exposes a defect, return the fix to its
+   owner and the changed behavior to the same reviewer, then rerun failed or invalidated checks. Reuse passing evidence
+   for unchanged inputs. Do not repeat the entire suite or review unchanged code merely because a phase has changed.
+   Acceptance still requires both review and all applicable checks to pass for the final change.
 8. The main thread owns long-lived server and sandbox lifecycle. Follow the tmux pattern below, and always destroy a
-   deployed sandbox plus verify deletion before finishing.
+   deployed sandbox plus verify deletion before finishing. Assign lifecycle ownership before a delegated runtime starts.
+   Its owner records parent and child PIDs and ports, then explicitly hands it off or verifies that owned descendants
+   and listeners have exited. Check process identity before stopping anything and preserve unrelated runtimes.
+
+### Delegation within an assignment
+
+`repo_implementer` and `test_implementer` remain hands-on leads. They may delegate independent, bounded edits to
+`implementation_worker`, repository questions to `repo_explorer`, and external questions to `researcher`. Production
+children own production code, infrastructure, and directly supporting configuration or documentation. Test children
+own only assigned `node:test`, parity, CDK, or comprehensive E2E tests and their fixtures. Reserve disjoint files or
+symbols before spawning; do not edit active child ownership. Return cross-subsystem decisions and scope changes to the
+main thread. Delegation is optional when the lead can complete the work directly.
+
+Every lead passes its original requirements, acceptance criteria, ownership, constraints, and permitted checks to each
+child; inspects and integrates child diffs; and waits for all descendants before reporting completion.
+`implementation_worker`, `repo_explorer`, `researcher`, and `test_runner` are leaves and must not delegate.
+The configured session ceiling is **32 subagents**, excluding the main thread, shared across nesting levels;
+the active host may allow fewer. There is no fixed per-lead or reviewer-scout cap; size fan-out to independent work and
+available capacity. Reviewers may use non-overlapping `repo_explorer` scouts but retain review judgment and validate
+their evidence.
+
+File ownership does not isolate command side effects. Coordinate through the main thread and serialize checks or
+generators that share `dist`, API reports, `.bb-data`, a runtime, or ports. Pass these resource reservations and runtime
+ownership down to workers along with permitted checks; use isolated resources when checks need to run in parallel.
+
+After a proven repeated defect, inspect same-pattern siblings and consumers of the shared helper within the assigned
+scope, then batch related repairs. Writers format only changed files they own and inspect the combined diff before
+handoff. A child result or focused check does not replace integrated verification. Wait for all writers and descendants,
+resolve independent review findings, then run the final `test_runner` gate; send corrections back to their existing owner.
 
 ---
 
@@ -275,8 +311,8 @@ get(..._a: unknown[]): never { return synthGuard('Thing', 'get'); }      // stub
 3. **Write a failing test first** — reproduce the bug in `test-apps/comprehensive/test/` (preferred) or `packages/<affected>/src/*.test.ts` (if purely internal). Confirm it fails.
 4. Fix the code in `packages/bb-*/`
 5. Confirm your test now passes: `npm run test:e2e:local` (e2e) or `cd packages/<affected> && npm test` (unit)
-6. Run full integration tests: `npm run test:e2e:local` from root
-7. Verify no regressions in related packages
+6. Complete independent review and resolve findings with focused checks.
+7. Run full integration tests (`npm run test:e2e:local` from root) and remaining required regression checks after review.
 
 ### Understanding Architecture
 
