@@ -4,6 +4,10 @@ OIDC sign-in gate for AWS Blocks applications. Sessions are long-lived and refre
 
 > Design & mock parity details: [DESIGN.md](./DESIGN.md)
 
+## System auth storage
+
+AuthOIDC's server-side session records use the Lambda execution role even when an application compute is identity-scoped. They are private system records needed to establish identity before application identity credentials exist. This marker applies only to AuthOIDC's nested session storage; it does not authenticate requests or grant application data access.
+
 ## Quickstart
 
 Backend (`aws-blocks/index.ts`):
@@ -438,6 +442,4 @@ const auth = new AuthOIDC(app, 'auth', {
 **Granularity.** Entries match on scheme + host + (port if pinned). Paths on the actual `relayTo` value are preserved through the 302 — the allowlist doesn't pattern-match paths.
 
 **Error handling.** If the IdP returns an error (e.g., user cancels consent), the backend forwards it through the relay: `302 Location: myapp://auth?error=access_denied&error_description=...&state=...`. The native SDK should check for `error` before looking for `code`.
-
-
 

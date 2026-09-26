@@ -8,6 +8,10 @@ Authentication backed by Amazon Cognito User Pools. Ships with username/password
 
 > Design & mock parity details: [DESIGN.md](./DESIGN.md)
 
+## System auth storage
+
+AuthCognito's server-side session records use the Lambda execution role even when an application compute is identity-scoped. They are private system records needed to establish identity before application identity credentials exist. This marker applies only to AuthCognito's nested session storage; it does not authenticate requests or grant application data access.
+
 ## Quick Start
 
 ```typescript

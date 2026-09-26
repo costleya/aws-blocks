@@ -106,6 +106,13 @@ Read-modify-write on the array is safe because SQS keeps a message invisible whi
 
 Tracking is opt-in because it is not free: it adds a DynamoDB table per job plus a write on submit and one per transition, and `submitBatch` would turn a single native SQS batch into an extra batch write. AsyncJob's default remains a single SQS call, and existing deployments gain no resources until they ask for them. `DistributedTable` rather than `KVStore` because only the former supports TTL, so status records expire on their own instead of accumulating.
 
+**Compute identity boundary:** status transitions are framework bookkeeping, not
+application records. The private nested status table is marked for system access
+so queued/processing/complete/failed writes continue to work without serializing
+request credentials into SQS. The job payload carries no credentials, and a job
+handler that accesses identity-protected application data runs without an active
+identity and fails closed.
+
 **Failure handling:** the `queued` write propagates to the caller — `submit()` asked for tracking, so failing loudly before the job is observable is correct. Writes on the handler path are swallowed and logged instead: throwing before the handler would retry work that was fine, and throwing after it succeeded would re-run work that had already completed. Status bookkeeping must never decide a job's fate. The visible consequence is that a dropped terminal write leaves a finished job without a terminal state, so `waitUntilComplete()` reports `Timeout` for work that actually succeeded — callers are told to read `Timeout` as "status unknown" rather than "still running", and to consult the job's own effect when they need certainty.
 
 **Not chosen:** publishing transitions over `bb-realtime`. Push delivery does not solve the underlying problem — a subscriber that connects after the fact still misses the event — and it would add a WebSocket dependency to every AsyncJob. Recorded history is both smaller and strictly more useful, since it works for late readers, retries, and tests alike.

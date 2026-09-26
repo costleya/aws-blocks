@@ -23,6 +23,7 @@ export const AgentErrors = {
 	InvalidModelConfig: 'InvalidModelConfigException',
 	ModelUnavailable: 'ModelUnavailableException',
 	BrowserNotSupported: 'BrowserNotSupportedException',
+	IdentityComputeUnsupported: 'IdentityComputeUnsupportedException',
 	StreamFailed: 'StreamFailedException',
 	InterruptRequired: 'InterruptRequiredException',
 } as const;

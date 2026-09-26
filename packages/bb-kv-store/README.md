@@ -30,9 +30,41 @@ const store = new KVStore(scope, id, options?)
 |--------|------|-------------|
 | `schema` | `StandardSchemaV1` | Runtime validation schema (Zod, Valibot, ArkType, etc.). When provided, the value type `T` is inferred from the schema and every `put()` validates the value before writing. |
 | `table` | `ExternalTableRef` | Wrap an existing DynamoDB table instead of creating one. |
+| `identityAccess` | `readonly IdentityResourceGrant<KVStoreOperation>[]` | Operations available to identities on a compute that has an identity provider. Each grant selects authenticated or guest access and can constrain keys with patterns. |
 | `logger` | `ChildLogger` | Optional logger for internal operations. When omitted, a default Logger at error level is created. |
 | `removalPolicy` | `'destroy' \| 'retain'` | Removal behavior for the underlying DynamoDB table. When omitted, the stack-wide `defaults` (from `BlocksPresets.sandbox`/`production`, chosen at `BlocksStack.create`) apply — `production` retains data on `cdk destroy`, `sandbox` destroys it. Pass `'destroy'`/`'retain'` to override for this one store. The table's deletion protection also follows the stack `defaults`. Ignored by the mock and browser runtimes. |
 | `ttl` | `boolean` | Enable DynamoDB Time-to-Live so items written with an expiry are deleted automatically. Defaults to `false`. See [Expiring Items](#expiring-items-ttl). |
+
+### Compute Identity Access
+
+Bind an IdentityPool to the compute for CDK grant generation, then declare which
+KVStore operations its roles may use. Inside an API method, call
+`await identityPool.assumeForIdentity(context)` before a user-scoped store call.
+The store retains raw-key semantics: grants do not add, remove, or rewrite prefixes.
+
+```typescript
+const notes = new KVStore(scope, 'notes', {
+  identityAccess: [{
+    access: 'authenticated',
+    operations: ['get', 'put', 'delete'],
+    keyPatterns: ['${identityId}#*'],
+  }],
+});
+```
+
+- `access` is either `'authenticated'` or `'guest'`. Declare each access level
+  separately when both need access.
+- `keyPatterns` supports literal `${identityId}` and `*`. Omitting it grants the
+  listed operations for every raw key; the example limits each identity to its
+  own `${identityId}#` namespace.
+- After explicit assumption, the local mock checks the attempted operation and
+  key against the grant. In AWS, IAM evaluates the synthesized role policy and
+  `dynamodb:LeadingKeys` condition. A failed or expired assumption fails closed.
+- A scan needs an explicit `scan` grant with no `keyPatterns`. DynamoDB cannot
+  apply a leading-key condition to a table-wide scan, so CDK rejects a
+  pattern-limited scan grant.
+- Calls without `assumeForIdentity(context)` use the ordinary handler client,
+  including on a compute bound to an IdentityPool.
 
 ### Expiring Items (TTL)
 
@@ -181,6 +213,3 @@ const legacy = new KVStore(scope, 'legacy', {
 ## Local Development
 
 Mock data persists to disk at `.bb-data/{fullId}/` across dev server restarts. Wipe with `rm -rf .bb-data`. The mock validates the 400 KB item size limit, schema validation, and conditional check failures, matching AWS behavior.
-
-
-

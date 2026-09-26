@@ -7,8 +7,9 @@ import { rmSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
-import { clearRouteRegistry, ApiError } from '@aws-blocks/core';
+import { clearRouteRegistry, ApiError, Scope, getSdkIdentifiers } from '@aws-blocks/core';
 import type { BlocksContext } from '@aws-blocks/core';
+import { KVStore } from '@aws-blocks/bb-kv-store';
 import { AuthOIDC, AuthOIDCErrors, stubIdp, google, customOidc, customOauth2, cognitoFederated } from './index.mock.js';
 import { handleDiscovery, handleJwks, handleAuthorize, handleAuthorizeSubmit, stubIssuerUrl } from './engines/stub-idp.js';
 import { buildExchangeUrl } from './engines/oidc-client-engine.js';
@@ -43,6 +44,25 @@ function freshContext(url = 'http://localhost:3000/'): BlocksContext {
 function unique(prefix = 'scope') {
 	return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
 }
+
+describe('identity-bound OIDC storage', () => {
+	test('keeps the private session table stable and system-scoped without bypassing sibling application storage', async () => {
+		const app = new Scope('identity-oidc-app', {
+			compute: { identityProviderFullId: 'identity-oidc-pool' },
+		});
+		const auth = new AuthOIDC(app, 'auth', { providers: [stubIdp({ name: 'stub' })] });
+		const notes = new KVStore<string>(app, 'notes');
+		const applicationChild = new KVStore<string>(auth, 'application-child');
+
+		assert.strictEqual(
+			getSdkIdentifiers(auth).sessionTableName,
+			'mock-identity-oidc-app-auth-sessions',
+			'the system marker must not change the established session table identity',
+		);
+		await assert.rejects(() => notes.put('note', 'private'), { name: 'IdentityPool.Unauthorized' });
+		await assert.rejects(() => applicationChild.put('note', 'private'), { name: 'IdentityPool.Unauthorized' });
+	});
+});
 
 // Subclass to reach the protected redirect_uri builder for unit assertions.
 class CallbackProbe extends AuthOIDC {

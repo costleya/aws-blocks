@@ -8,6 +8,9 @@ import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type { api as apiType } from 'aws-blocks';
+import type { identityPoolApi as identityPoolApiType } from 'aws-blocks';
+import { __resetConnectionsForTest } from '@aws-blocks/bb-realtime/mock-middleware';
+import { identityPoolTests } from './identity-pool.test.js';
 import { installCookieJar } from './cookie-jar.js';
 import { kvStoreTests } from './kv-store.test.js';
 import { distributedTableTests } from './distributed-table.test.js';
@@ -42,6 +45,7 @@ const backendPath = join(__dirname, '..', 'aws-blocks', 'index.cdk.ts');
 
 let server: ChildProcess | null = null;
 let api: typeof apiType;
+let identityPoolApi: typeof identityPoolApiType;
 
 async function waitForServer(maxAttempts = 30) {
   for (let i = 0; i < maxAttempts; i++) {
@@ -130,12 +134,16 @@ test.before(async () => {
   // Import API after config is written
   const module = await import('aws-blocks');
   api = module.api;
+  identityPoolApi = module.identityPoolApi;
   
   await waitForServer();
   console.log('✅ Server ready\n');
 });
 
 test.after(async (t) => {
+  // Hydrated Realtime channels share a client WebSocket across suites. Close it
+  // before stopping the server so teardown cannot schedule reconnect attempts.
+  __resetConnectionsForTest();
   if (server) {
     console.log('\n🛑 Stopping local server...');
     // Kill the entire process group (npm + tsx grandchild)
@@ -188,6 +196,7 @@ test('Sanity check - API calls use HTTP not direct imports', { timeout: 10_000 }
 
 // KVStore tests (separate file)
 kvStoreTests(() => api);
+identityPoolTests(() => identityPoolApi, () => api);
 
 // DistributedTable tests (separate file)
 distributedTableTests(() => api);

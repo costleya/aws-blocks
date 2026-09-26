@@ -3,6 +3,10 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
+import { ApiNamespace } from './api.js';
+import { Scope } from './common/index.js';
+import { ApiError } from './errors.js';
+import { assumeRequestIdentity, clearRequestIdentity, type IdentityProvider, registerIdentityProvider, runWithIdentity } from './common/identity-context.js';
 import { createLambdaHandler, _resetCorsPatterns, requestCookies, isApiGatewayHttpEvent, computeHttpDeadlineMs, classifyEvent, buildEventUrl, isLoopbackForwardedHost, TransientConfigError } from './lambda-handler.js';
 import type { LambdaContext } from './lambda-handler.js';
 import { registerRoute, clearRouteRegistry, getRegisteredRoutes } from './raw-route.js';
@@ -29,6 +33,180 @@ async function invoke(backend: any, event: any): Promise<any> {
   const handler = createLambdaHandler(async () => backend);
   return handler(event) as any;
 }
+
+let identityProviderNumber = 0;
+
+function identityProvider(): IdentityProvider {
+	identityProviderNumber++;
+	const fullId = `test/lambda-provider-${identityProviderNumber}`;
+	return {
+		fullId,
+		async run(context, callback) {
+			const authorization = context.request.headers.get('authorization');
+			if (authorization === null) {
+				return runWithIdentity(
+					fullId,
+					{ identityId: `${fullId}:guest`, mode: 'mock', authenticated: false },
+					callback,
+				);
+			}
+			if (authorization !== 'Bearer valid') {
+				throw new ApiError('invalid identity token', 401, { name: 'IdentityPool.Unauthorized' });
+			}
+			return runWithIdentity(
+				fullId,
+				{ identityId: `${fullId}:user`, mode: 'mock', authenticated: true },
+				callback,
+			);
+		},
+	};
+}
+
+function identityRpcBackend(provider: IdentityProvider, calls: { count: number }, contexts?: BlocksContext[]) {
+	registerIdentityProvider(provider);
+	const scope = new Scope(`api-${provider.fullId}`, { compute: { identityProviderFullId: provider.fullId } });
+	const api = new ApiNamespace(scope, 'api', (context) => ({
+		unassumed() {
+			calls.count++;
+			contexts?.push(context);
+			return { identity: context.identity ?? null, contextHasCredentials: 'credentials' in context };
+		},
+		async identity() {
+			calls.count++;
+			contexts?.push(context);
+			const attempt = clearRequestIdentity(provider.fullId, context);
+			const authorization = context.request.headers.get('authorization');
+			if (authorization !== null && authorization !== 'Bearer valid') {
+				throw new ApiError('invalid identity token', 401, { name: 'IdentityPool.Unauthorized' });
+			}
+			const identity = {
+				identityId: `${provider.fullId}:${authorization === null ? 'guest' : 'user'}`,
+				mode: 'mock' as const,
+				authenticated: authorization !== null,
+			};
+			assumeRequestIdentity(provider.fullId, context, identity, attempt);
+			return {
+				identityId: identity.identityId,
+				contextIdentity: context.identity,
+				contextHasCredentials: 'credentials' in context,
+			};
+		},
+	}));
+	return { api };
+}
+
+describe('createLambdaHandler — explicit compute identity', () => {
+	it('enters the API factory and ordinary method without exchanging a bearer token', async () => {
+		const provider = identityProvider();
+		registerIdentityProvider(provider);
+		const scope = new Scope(`factory-${provider.fullId}`, { compute: { identityProviderFullId: provider.fullId } });
+		let factoryCalls = 0;
+		const api = new ApiNamespace(scope, 'api', (context) => {
+			factoryCalls++;
+			assert.strictEqual(context.identity, undefined);
+			return {
+				async unassumed() {
+					return context.identity ?? null;
+				},
+			};
+		});
+		const body = JSON.stringify({ jsonrpc: '2.0', method: 'api.unassumed', params: [], id: 1 });
+		for (const authorization of [undefined, 'Bearer valid', 'Bearer invalid']) {
+			const headers = authorization ? { Authorization: authorization } : undefined;
+			const response = JSON.parse((await invoke({ api }, makeEvent({ body, headers }))).body);
+			assert.strictEqual(response.result, null);
+		}
+		assert.strictEqual(factoryCalls, 3);
+	});
+
+	it('keeps an unbound RPC namespace on the ordinary Lambda path', async () => {
+		let calls = 0;
+		const result = await invoke(
+			{
+				api: () => ({
+					async identity() {
+						calls++;
+						return { normal: true };
+					},
+				}),
+			},
+			makeEvent({ body: JSON.stringify({ jsonrpc: '2.0', method: 'api.identity', params: [], id: 1 }) }),
+		);
+		assert.strictEqual(result.statusCode, 200);
+		assert.deepStrictEqual(JSON.parse(result.body).result, { normal: true });
+		assert.strictEqual(calls, 1);
+	});
+
+	it('exchanges guest and authenticated identities only inside the method that assumes them', async () => {
+		const provider = identityProvider();
+		const calls = { count: 0 };
+		const backend = identityRpcBackend(provider, calls);
+		const body = JSON.stringify({ jsonrpc: '2.0', method: 'api.identity', params: [], id: 1 });
+		const guest = JSON.parse((await invoke(backend, makeEvent({ body }))).body).result;
+		assert.deepStrictEqual(guest.contextIdentity, { identityId: `${provider.fullId}:guest`, authenticated: false });
+		assert.strictEqual(guest.contextHasCredentials, false);
+		const authenticated = JSON.parse(
+			(await invoke(backend, makeEvent({ body, headers: { Authorization: 'Bearer valid' } }))).body,
+		).result;
+		assert.deepStrictEqual(authenticated.contextIdentity, {
+			identityId: `${provider.fullId}:user`,
+			authenticated: true,
+		});
+		assert.strictEqual(authenticated.contextHasCredentials, false);
+		assert.strictEqual(calls.count, 2);
+	});
+
+	it('removes an explicitly assumed identity from the real Lambda RPC context after dispatch', async () => {
+		const provider = identityProvider();
+		const contexts: BlocksContext[] = [];
+		const backend = identityRpcBackend(provider, { count: 0 }, contexts);
+		const body = JSON.stringify({ jsonrpc: '2.0', method: 'api.identity', params: [], id: 1 });
+		await invoke(backend, makeEvent({ body }));
+		assert.strictEqual(contexts.length, 1);
+		assert.strictEqual(contexts[0].identity, undefined);
+	});
+
+	it('serializes invalid identity errors from the explicit assumption method', async () => {
+		const provider = identityProvider();
+		const calls = { count: 0 };
+		const body = JSON.stringify({ jsonrpc: '2.0', method: 'api.identity', params: [], id: 1 });
+		const result = await invoke(
+			identityRpcBackend(provider, calls),
+			makeEvent({
+				headers: { Authorization: 'Bearer invalid-token' },
+				body,
+			}),
+		);
+		const error = JSON.parse(result.body).error;
+		assert.strictEqual(error.data.name, 'IdentityPool.Unauthorized');
+		assert.strictEqual(error.message.includes('invalid-token'), false);
+		assert.strictEqual(calls.count, 1);
+	});
+
+	it('leaves RawRoute on the ordinary request scope until it selects an identity', async () => {
+		const provider = identityProvider();
+		registerIdentityProvider(provider);
+		registerRoute({
+			method: 'GET',
+			path: '/identity-route',
+			identityProviderFullId: provider.fullId,
+			async handler(context) {
+				context.response.send({ identity: context.identity ?? null });
+			},
+		});
+		const result = await invoke(
+			{},
+			makeEvent({
+				httpMethod: 'GET',
+				path: '/identity-route',
+				body: null,
+				headers: { Authorization: 'Bearer invalid' },
+			}),
+		);
+		assert.strictEqual(result.statusCode, 200);
+		assert.deepStrictEqual(JSON.parse(result.body).identity, null);
+	});
+});
 
 // ── init self-heal (retry on failed initialization) ─────────────────────────
 

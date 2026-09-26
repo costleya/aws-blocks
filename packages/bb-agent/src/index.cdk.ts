@@ -1,13 +1,14 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { BuildingBlockScope } from '@aws-blocks/core/cdk';
+import { BuildingBlockScope, getComputeIdentityProvider } from '@aws-blocks/core/cdk';
 import type { ScopeParent } from '@aws-blocks/core';
 import { DistributedTable } from '@aws-blocks/bb-distributed-table';
 import { Realtime } from '@aws-blocks/bb-realtime';
 import { FileBucket } from '@aws-blocks/bb-file-bucket';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { AgentCoreRuntime } from './agentcore-runtime.cdk.js';
+import { AgentErrors, blocksAgentError } from './errors.js';
 import { messageSchema, conversationSchema, agentStreamChunkSchema } from './schemas.js';
 import type { AgentConfig } from './types.js';
 
@@ -29,6 +30,12 @@ export class Agent extends BuildingBlockScope {
 	 */
 	constructor(scope: ScopeParent, id: string, config?: AgentConfig) {
 		super(id, { parent: scope, vpc: { interfaceEndpoints: [ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME] } });
+		if (getComputeIdentityProvider(this)) {
+			throw blocksAgentError(
+				AgentErrors.IdentityComputeUnsupported,
+				`Agent "${this.fullId}" cannot run on an identity-bound compute because its AgentCore background runtime cannot forward request identity.`,
+			);
+		}
 
 		// Session-snapshot bucket. Provisioned here (and granted to the shared execution role that the
 		// AgentCore Runtime runs as); the deployed loop re-derives its name from this bucket's `fullId`

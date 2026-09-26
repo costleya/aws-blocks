@@ -11,4 +11,4 @@
  * CDK-free `Compute` handle.
  */
 export { LambdaCompute } from './index.aws.js';
-export type { LambdaComputeProps } from './types.js';
+export type { IdentityPoolReference, LambdaComputeProps } from './types.js';

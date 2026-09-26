@@ -66,6 +66,10 @@ const channel = await agent.getChannel(conversationId); // too late!
 
 The `useChat` hook (see [Client Hook](#client-hook--usechat)) handles this ordering automatically. Use it instead of hand-rolling stream logic.
 
+### Compute identity boundary
+
+`Agent` cannot be constructed on a compute bound to an Identity Pool. AgentCore accepts a turn and continues it in a background runtime, so no active request identity exists for its conversation, message, or snapshot writes. Construction fails with `AgentErrors.IdentityComputeUnsupported` before it provisions those resources. Keep identity-bound request work in an API handler and use a separate unbound compute for Agent workloads.
+
 ### Authorization (caller responsibility)
 
 The Agent BB scopes data by `conversationId`, which is an unguessable UUID, but it does **not** authorize the caller against a conversation on read paths. `getConversation(id)` and `getPendingInterrupts(conversationId)` take only an id, so any caller that supplies a valid conversation ID gets the messages back.
@@ -325,6 +329,7 @@ try {
 | `AgentErrors.PersistenceRequired` | Conversation CRUD called on an inferenceOnly agent. |
 | `AgentErrors.InvalidModelConfig` | Missing modelId, apiKey, unknown provider, or `needsApproval` + `interrupt` both specified. |
 | `AgentErrors.ModelUnavailable` | All model candidates failed health checks. Check logs for details. |
+| `AgentErrors.IdentityComputeUnsupported` | Agent was constructed on an identity-bound compute. Use an unbound compute because AgentCore background turns have no request identity. |
 | `AgentErrors.StreamFailed` | Agent encountered an error during execution. |
 | `AgentErrors.InterruptRequired` | Agent paused for approval. Use `InterruptError` for typed access to pending interrupts. |
 | `AgentErrors.BrowserNotSupported` | Agent instantiated in the browser (server-side only). |

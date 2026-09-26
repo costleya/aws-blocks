@@ -30,6 +30,18 @@ import { registerCompute } from './compute-registry.js';
  * @internal Not exported from the package's public entry points.
  */
 export abstract class Compute extends Scope {
+	/** The request identity provider bound to this compute, when identity-scoped. */
+	identityProviderFullId?: string;
+
+	/** Bind this compute to one request identity provider. @internal */
+	bindIdentityProvider(providerFullId: string): void {
+		if (this.identityProviderFullId) {
+			throw new Error(
+				`Compute "${this.fullId}" is already bound to identity provider "${this.identityProviderFullId}".`,
+			);
+		}
+		this.identityProviderFullId = providerFullId;
+	}
 	/**
 	 * API namespaces assigned to run on this compute — recorded so request
 	 * routing can map a namespace to the compute that hosts it. Currently
@@ -53,6 +65,7 @@ export abstract class Compute extends Scope {
 
 	constructor(id: string, options?: ScopeOptions) {
 		super(id, options);
+		this._compute = this;
 		// Self-register on the owning stack so finalize steps (tracing, routing,
 		// dashboards) can enumerate every compute without a separate discovery
 		// pass. Scoped per stack, so a multi-stack synth keeps lists isolated.

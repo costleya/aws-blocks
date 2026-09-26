@@ -4,7 +4,7 @@
 // Comprehensive test backend covering all Building Blocks
 // This is NOT a user-facing template - it's designed for maximum test coverage
 
-import { ApiNamespace, Scope, KVStore, AuthBasic, AuthCognito, AuthOIDC, google, stubIdp, relayOrigin, DistributedTable, Realtime, Database, CronJob, FileBucket, KnowledgeBase, sql, RawRoute, EmailClient } from '@aws-blocks/blocks';
+import { ApiNamespace, Scope, KVStore, AuthBasic, AuthCognito, AuthOIDC, google, stubIdp, relayOrigin, DistributedTable, Realtime, Database, CronJob, FileBucket, KnowledgeBase, sql, RawRoute, EmailClient, IdentityPool, LambdaCompute, ApiError } from '@aws-blocks/blocks';
 export type { RealtimeChannel, DisconnectReason, SubscribeOptions } from '@aws-blocks/blocks';
 import type { EmailMessage } from '@aws-blocks/blocks';
 import type { ConditionalWriteOptions, ConditionalDeleteOptions } from '@aws-blocks/bb-kv-store';
@@ -19,9 +19,103 @@ import { Logger } from '@aws-blocks/bb-logger';
 import { createKyselyAdapter, DatabaseErrors } from '@aws-blocks/bb-data';
 import { DistributedDatabase, DistributedDatabaseErrors } from '@aws-blocks/bb-distributed-data';
 import { z } from 'zod';
-
-
 const scope = new Scope('test-app');
+
+// Explicit local-only identities keep the offline fixture out of deployed stacks.
+// Real OIDC provider provisioning and sandbox acceptance are a separate follow-up.
+const identityPool = process.env.BLOCKS_TEST_ENV === 'local' ? new IdentityPool(scope, 'identity-pool', {
+  provider: {
+    name: 'identity.example.test',
+    oidcProviderArn: 'arn:aws:iam::000000000000:oidc-provider/identity.example.test',
+  },
+  mockIdentities: {
+    'identity-alice': 'eu-west-1:11111111-1111-4111-8111-111111111111',
+    'identity-bob': 'eu-west-1:22222222-2222-4222-8222-222222222222',
+  },
+}) : undefined;
+const identityCompute = identityPool ? new LambdaCompute(scope, 'identity-compute', { identityPool }) : undefined;
+const identityScope = new Scope('identity', { parent: identityCompute ?? scope });
+const identityNotes = identityPool ? new KVStore(identityScope, 'identity-notes', {
+  identityAccess: [
+    { access: 'authenticated', operations: ['put', 'get', 'delete'], keyPatterns: ['notes/${identityId}/*'] },
+    { access: 'authenticated', operations: ['put', 'delete'], keyPatterns: ['public/*'] },
+    { access: 'guest', operations: ['get'], keyPatterns: ['public/*'] },
+  ],
+}) : undefined;
+const identityItems = identityPool ? new DistributedTable(identityScope, 'identity-items', {
+  schema: z.object({ pk: z.string(), sk: z.string(), value: z.string() }),
+  key: { partitionKey: 'pk', sortKey: 'sk' },
+  identityAccess: [{ access: 'authenticated', operations: ['put', 'get', 'delete'], keyPatterns: ['${identityId}'] }],
+}) : undefined;
+const identityFiles = identityPool ? new FileBucket(identityScope, 'identity-files', {
+  versioned: false,
+  removalPolicy: 'destroy',
+  identityAccess: [{ access: 'authenticated', operations: ['put', 'get', 'delete'], keyPatterns: ['private/${identityId}/*'] }],
+}) : undefined;
+
+export const identityPoolApi = new ApiNamespace(identityScope, 'identityPoolApi', (context) => {
+  function configured() {
+    if (!identityPool || !identityNotes || !identityItems || !identityFiles) throw new ApiError('Identity Pool fixture is local-only', 503);
+    return { pool: identityPool, notes: identityNotes, items: identityItems, files: identityFiles };
+  }
+  async function assume() {
+    return configured().pool.assumeForIdentity(context);
+  }
+  return {
+    async marker() {
+      return assume();
+    },
+    unassumedMarker() {
+      return context.identity ?? null;
+    },
+    async unassumedKvPut(key: string, value: string) {
+      await configured().notes.put(key, value);
+    },
+    async unassumedKvGet(key: string) {
+      return configured().notes.get(key);
+    },
+    async unassumedKvDelete(key: string) {
+      await configured().notes.delete(key);
+    },
+    async kvPut(key: string, value: string) {
+      await assume();
+      await configured().notes.put(key, value);
+    },
+    async kvGet(key: string) {
+      await assume();
+      return configured().notes.get(key);
+    },
+    async kvDelete(key: string) {
+      await assume();
+      await configured().notes.delete(key);
+    },
+    async tablePut(pk: string, sk: string, value: string) {
+      await assume();
+      await configured().items.put({ pk, sk, value });
+    },
+    async tableGet(pk: string, sk: string) {
+      await assume();
+      return configured().items.get({ pk, sk });
+    },
+    async tableDelete(pk: string, sk: string) {
+      await assume();
+      await configured().items.delete({ pk, sk });
+    },
+    async filePut(path: string, body: string) {
+      await assume();
+      await configured().files.put(path, body);
+    },
+    async fileGet(path: string) {
+      await assume();
+      const file = await configured().files.get(path);
+      return file?.body.toString() ?? null;
+    },
+    async fileDelete(path: string) {
+      await assume();
+      await configured().files.delete(path);
+    },
+  };
+});
 
 // Auth verification codes are sensitive. e2e tests read them back through the
 // `getLast*Code` API methods below — NOT from logs — so we only echo them to
@@ -834,6 +928,10 @@ export const DbInsertInput = z.object({
 // ============================================================================
 
 export const api = new ApiNamespace(scope, 'api', (context) => ({
+
+  identityMarker() {
+    return context.identity ?? null;
+  },
   
   // ------------------------------------------------------------------------
   // KVStore Tests

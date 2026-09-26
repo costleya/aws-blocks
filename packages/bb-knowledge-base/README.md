@@ -46,6 +46,7 @@ const kb = new KnowledgeBase(scope, id, options)
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `source` | `string` | (required) | Document source — local folder path or `s3://` URI pointing to a bucket or folder. |
+| `identityAccess` | `readonly IdentityResourceGrant<KnowledgeBaseOperation>[]` | — | Operations available to identities on a compute that has an identity provider. Each grant selects authenticated or guest access for the whole knowledge base. |
 | `chunking` | `ChunkingConfig` | `{ strategy: 'semantic' }` | How documents are split into chunks. |
 | `embeddingDimensions` | `256 \| 512 \| 1024` | `1024` | Embedding model dimensions. |
 | `description` | `string` | — | Human-readable description for the knowledge base. |
@@ -128,6 +129,24 @@ await kb.waitUntilSynced({ signal: AbortSignal.timeout(120_000) });
 `maxConsecutiveTransientErrors` is the number of *consecutive* transient control-plane errors tolerated before giving up; the counter resets on any clean poll. Two conditions are treated as transient and ridden out: throttling / transient network failures, **and** a *not-yet-visible* knowledge base — in the post-deploy window the control plane can briefly return `ResourceNotFoundException` (the freshly-created KB or data source hasn't propagated yet), which `waitUntilSynced()` absorbs rather than giving up on. Terminal errors always short-circuit immediately regardless of the limit: a `FAILED` ingestion job, and a *missing-KB config* error (the `KB_ID` env var is unset — distinct from the transient not-yet-visible case). When `signal` is provided, the wait is cancelled promptly (checked before each poll and during the inter-poll delay), rejecting with the signal's abort reason (by default a `DOMException` named `'AbortError'`).
 
 Both local-folder and imported `s3://` sources register a BB-managed data source, so sync state reflects that data source's ingestion job in either case. (A deployment predating this sync API has no data source id injected, so `isSynced()` returns `true` immediately — there is nothing to track.) This pre-feature deployment is the **only** case where `isSynced()` returns `true` without consulting an actual ingestion job — re-deploying injects `DATA_SOURCE_ID` and restores real tracking, so a freshly deployed KB always reflects a real job status (don't mistake the "nothing to track" shortcut for "ingestion confirmed complete" when gating live traffic). In local development the mock is always synced. Note that a local `isSynced()` of `true` does **not** imply `retrieve()` works for an `s3://` source — the mock rejects `s3://` with `InvalidSourceConfigException` (the inverse of the production contract), so validate `s3://` sources in sandbox/production where sync state genuinely reflects queryability.
+
+## Compute Identity Access
+
+Bind an IdentityPool to the compute for grant synthesis, then call `await identityPool.assumeForIdentity(context)` inside an API method before user-scoped KnowledgeBase operations. The pool roles have no knowledge-base access unless `identityAccess` explicitly grants it. The supported operations are `retrieve`, `isSynced`, and `waitUntilSynced`; grant only the operations the API method needs.
+
+```typescript
+const kb = new KnowledgeBase(scope, 'docs', {
+  source: './knowledge',
+  identityAccess: [
+    { access: 'authenticated', operations: ['retrieve'] },
+    { access: 'guest', operations: ['retrieve'] },
+  ],
+});
+```
+
+KnowledgeBase grants apply to the entire knowledge base. `keyPatterns` are rejected because Bedrock retrieval does not expose a caller-controlled S3 document key or S3 Vectors key for IAM to enforce. After explicit assumption, the mock simulates the declared operation grant; AWS calls use the selected temporary credentials and IAM evaluates the role policy. A failed or expired assumption fails closed. Without an assumption, calls use the ordinary handler client.
+
+The source S3 bucket, vector store, embedding model, and ingestion job use the Bedrock service role. Those ingestion permissions are system access, not compute-identity access: granting `retrieve` never grants callers direct S3 or vector-store access, and it cannot restrict retrieval to an S3 prefix. Use separate knowledge bases or metadata filtering when the application needs content segmentation. See AWS’s [Knowledge Base API permission examples](https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base-prereq-permissions-general.html) and [Knowledge Base service-role permissions](https://docs.aws.amazon.com/bedrock/latest/userguide/kb-permissions.html).
 
 ## Metadata Filtering
 

@@ -10,6 +10,7 @@
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 
 import { type ScopeParent, registerSdkIdentifiers, getSdkIdentifiers } from '@aws-blocks/core';
+import { markSystemIdentityScope } from '@aws-blocks/core/bb-utils';
 import { resolveCookieSecurity } from '@aws-blocks/auth-common/cookies';
 import { KVStore } from '@aws-blocks/bb-kv-store';
 import { BB_NAME, BB_VERSION } from './version.js';
@@ -66,6 +67,7 @@ export class AuthOIDC<
 		const parameterName = process.env[envVarName] ?? '';
 
 		const sessions = new KVStore<SessionRow>(scope, `${id}-sessions`);
+		markSystemIdentityScope(sessions);
 
 		const cookieOpts = {
 			...resolveCookieSecurity({
@@ -166,4 +168,3 @@ function scopeFullId(scope: ScopeParent, id: string): string {
 	if (current && 'id' in current) segments.unshift(current.id);
 	return segments.join('-');
 }
-

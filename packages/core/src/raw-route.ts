@@ -103,6 +103,8 @@ export interface RegisteredRoute {
   /** Extracted parameter names in capture-group order. */
   paramNames: string[];
   handler: (context: BlocksContext) => Promise<void>;
+  /** Identity provider selected by this route's compute, when bound. @internal */
+  identityProviderFullId?: string;
 }
 
 /**
@@ -238,7 +240,7 @@ export function unlockRouteRegistry(): void {
  * @throws If the path is under the reserved namespace (`/aws-blocks` or `/aws-blocks/api/*`).
  * @throws {RawRouteErrors.DuplicateRoute} If the same method+path is registered twice.
  */
-export function registerRoute(options: RawRouteOptions & { path: string }): void {
+export function registerRoute(options: RawRouteOptions & { path: string; identityProviderFullId?: string }): void {
   const state = getState();
   if (state.locked) {
     throw new Error('Routes must be registered during initialization. Cannot register routes after handler creation.');
@@ -277,6 +279,7 @@ export function registerRoute(options: RawRouteOptions & { path: string }): void
     pattern,
     paramNames,
     handler: options.handler,
+    identityProviderFullId: options.identityProviderFullId,
   });
 }
 

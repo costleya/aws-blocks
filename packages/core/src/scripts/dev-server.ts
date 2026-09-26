@@ -11,6 +11,7 @@ import type { Duplex } from 'node:stream';
 import httpProxy from 'http-proxy';
 import { writeClientCode } from './generate-client.js';
 import { ApiError } from '../errors.js';
+import { runWithRequestScope } from '../common/identity-context.js';
 import { BLOCKS_RPC_PREFIX, BLOCKS_SANDBOX_PREFIX } from '../constants.js';
 import { BLOCKS_SANDBOX_DIR } from '../common/constants.js';
 import { matchRoute, lockRouteRegistry } from '../raw-route.js';
@@ -1213,15 +1214,24 @@ function handleApiRequest(
           return;
         }
 
-        const apiMethods = typeof apiHandler === 'function' ? apiHandler(context) : apiHandler;
+        const { methodFound, result } = await runWithRequestScope(
+          context,
+          async () => {
+            const apiMethods = typeof apiHandler === 'function' ? apiHandler(context) : apiHandler;
 
-        if (!apiMethods[rpcMethod]) {
+            if (!apiMethods[rpcMethod]) {
+              return { methodFound: false as const, result: undefined };
+            }
+
+            return { methodFound: true as const, result: await apiMethods[rpcMethod](...args) };
+          },
+        );
+
+        if (!methodFound) {
           res.writeHead(200, rpcHeaders);
           res.end(methodNotFoundResponse(`'${rpcMethod}' on API '${apiNamespace}'`, rpcId));
           return;
         }
-
-        const result = await apiMethods[rpcMethod](...args);
 
         const headerObj: Record<string, string | string[]> = {};
         for (const [key, value] of responseHeaders.entries()) {
@@ -1288,7 +1298,7 @@ function handleApiRequest(
           },
         };
 
-        await matched.route.handler(context);
+        await runWithRequestScope(context, () => matched.route.handler(context));
 
         const headerObj: Record<string, string | string[]> = {};
         for (const [key, value] of responseHeaders.entries()) {

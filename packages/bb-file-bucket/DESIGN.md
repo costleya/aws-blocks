@@ -76,6 +76,35 @@ versions/{key}/__deleted__        delete marker (sentinel)
 **Decision:** When versioning is enabled (the default — D-FB-10), the main bucket gets a lifecycle rule (`ExpireNoncurrentVersions`) that permanently expires **noncurrent** object versions after `noncurrentVersionExpirationDays` (default `DEFAULT_NONCURRENT_VERSION_EXPIRATION_DAYS = 90`). The value's FORMAT is validated at synth whenever the option is provided, regardless of `versioned`: a non-positive or non-integer value throws (a degenerate `Duration.days(0)`/negative would otherwise only surface at deploy — same fail-fast principle as D-FB-8/D-FB-12). The rule itself is only APPLIED when versioning is on. There is no "disable" sentinel; to drop the rule entirely, disable versioning (`versioned: false`), which removes it along with versioning. The rule is inert on the mock and browser runtimes (no AWS resource).
 **Rationale:** Addresses review comment (A): defaulting versioning ON (D-FB-10) makes overwrites/deletes recoverable but lets prior versions accrue storage cost without bound. Capping noncurrent versions at 90 days by default keeps the safe-by-default posture affordable — the common case (recover from a recent bad write) is well within 90 days, while stale versions no longer pile up indefinitely. It pairs with, and offsets the cost concern raised by, the versioning-default-on change rather than reopening that decision.
 
+**D-FB-15: Identity access is resource-defined and request-scoped**
+**Decision:** `identityAccess` grants FileBucket's own operation names to an
+authenticated or guest identity role, with optional `*` and `${identityId}`
+object-key patterns. `get` requires one or more slash-delimited prefixes
+ending in `/*` for its missing-object probe. `scan` and `listVersions` can be
+explicitly granted without key patterns; when patterned, they also require
+slash-delimited prefixes ending in `/*`. Other operations can use an omitted
+or broader pattern. After explicit `assumeForIdentity(context)`, the mock checks
+the grant locally. In AWS, the call creates a fresh S3 client from the selected
+temporary credentials and relies on the synthesized IAM role policy for operation
+and key enforcement. Without an assumption, a bound compute uses the ordinary
+execution-role client; a failed or expired assumption cannot fall back to it.
+For an `AccessDenied` from an unversioned assumed-identity `get`,
+the runtime performs a `ListObjectsV2` probe with the requested key as its prefix and
+returns `null` only when that exact key is absent. The CDK layer grants only
+the selected identity role the mapped S3 actions, using object ARNs for object
+operations and a bucket ARN with `s3:prefix` for list operations.
+**Rationale:** Identity Pool binding belongs to the compute, while authorization
+belongs to each resource. Keeping grants on FileBucket makes the method and key
+contract visible at construction, prevents accidental guest access, and lets
+the mock simulate the declared restrictions. A `ListBucket` condition on
+an exact key such as `foo` would also authorize a listing of `foobar`;
+requiring a slash-delimited prefix for listing operations prevents that
+cross-prefix disclosure while allowing the existence probe that maintains
+FileBucket's `get()` null-on-missing contract.
+Each identity client is held until a download body is fully read or a URL is
+signed, then destroyed; a signed URL remains valid independently for its
+requested expiry.
+
 ## Infrastructure (CDK)
 
 Creates a single S3 bucket (plus a dedicated log bucket when `accessLogging` is enabled):
@@ -117,7 +146,7 @@ Creates a single S3 bucket (plus a dedicated log bucket when `accessLogging` is 
 | No storage classes | Transition rules have no effect locally | No mitigation — storage classes are a cost optimization |
 | No multipart upload | Large files use simple write locally | No mitigation — mock uses `fs.writeFile` regardless of size |
 | Presigned URLs are localhost-only | URLs only work against the local dev server | No mitigation — expected behavior for local development |
-| No IAM enforcement | Permission errors only surface in AWS | No mitigation — IAM is handled by CDK grants automatically |
+| No IAM evaluation | The mock simulates `identityAccess` grants after explicit assumption, but cannot prove AWS IAM policy evaluation | Check synthesized policies and verify deployed IAM separately when required |
 | Filesystem path limits | Some OS path length limits differ from S3 key limits (1,024 bytes) | Mock validates key length and warns when it exceeds 1,024 bytes |
 | Path-traversal keys rejected locally | The mock maps keys onto the real filesystem, so it rejects keys that escape the bucket's content root (e.g. `../escape.txt`). S3 has no filesystem and treats `..` as a literal key segment, so it accepts such keys. A pathological key containing `..` that "works" on S3 will throw `ValidationFailed` locally. | Intentional — the guard prevents a local key from clobbering files outside `.bb-data`. Avoid `..` segments in keys (also S3 best practice). Covered by `src/path-containment.test.ts`. |
 | Non-atomic `put()` | On a versioned bucket, `put()` performs several separate `writeFileSync` calls (version body, version metadata, current body, current metadata, delete-marker cleanup). A crash or process kill mid-`put()` can leave torn state — a body with no metadata sidecar, or a version body with no `.json`. Real S3 `PutObject` is atomic per object. | No mitigation today — the filesystem layout has no transaction boundary. Acceptable for a dev mock (re-running `put()` heals it). See Open Question 4 (storage engine). |

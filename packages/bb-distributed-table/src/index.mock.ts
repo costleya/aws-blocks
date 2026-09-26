@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Scope, registerSdkIdentifiers } from '@aws-blocks/core';
-import { getMockDataDir } from '@aws-blocks/core/bb-utils';
+import { assertResourceIdentityAccess, getMockDataDir, registerResourceIdentityAccess } from '@aws-blocks/core/bb-utils';
 import type { ScopeParent } from '@aws-blocks/core';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -14,6 +14,7 @@ export type {
 	TableKeyConfig,
 	DistributedTableOptions,
 	ReadValidationMode,
+	DistributedTableOperation,
 	ExternalTableRef,
 	ExternalKmsKeyRef,
 	TableKey,
@@ -37,6 +38,7 @@ import type {
 	DeleteOptions,
 	TableKey,
 	ReadValidationMode,
+	DistributedTableOperation,
 } from './types.js';
 import { DistributedTableErrors, DistributedTableMessages, blocksError, conditionalCheckFailed, normalizeSortKeyCondition, applyReadValidation } from './errors.js';
 
@@ -147,9 +149,11 @@ export class DistributedTable<
 		this.indexes = (options.indexes ?? {}) as Indexes;
 		this.readValidation = options.readValidation ?? 'coerce';
 		registerSdkIdentifiers(this.fullId, { tableName: `mock-${this.fullId}`.substring(0, 255) });
+		registerResourceIdentityAccess(this, options.identityAccess ?? []);
 	}
 
 	async get(key: TableKey<T, K>): Promise<T | null> {
+		this.assertIdentityAccess('get', this.partitionKeyValue(key));
 		return this.reconcileRead(this.data.get(this.serializeKey(key)) ?? null);
 	}
 
@@ -164,6 +168,7 @@ export class DistributedTable<
 	}
 
 	async put(item: T, options?: PutOptions<T>): Promise<void> {
+		this.assertIdentityAccess('put', this.partitionKeyValue(item));
 		await validateSchema(this.schema, item);
 
 		const serialized = JSON.stringify(item);
@@ -190,6 +195,7 @@ export class DistributedTable<
 	}
 
 	async delete(key: TableKey<T, K>, options?: DeleteOptions<T>): Promise<void> {
+		this.assertIdentityAccess('delete', this.partitionKeyValue(key));
 		const keyStr = this.serializeKey(key);
 
 		// Existence assertion wins (see put): `ifExists` makes a conflict
@@ -247,6 +253,7 @@ export class DistributedTable<
 		if (pkValue === undefined) {
 			throw blocksError(DistributedTableErrors.InvalidQuery, DistributedTableMessages.partitionKeyEqualsRequired(pkField));
 		}
+		this.assertIdentityAccess('query', pkValue);
 
 		// Normalize the sort-key condition up front — before scanning data — so the
 		// mock behaves identically to the AWS runtime regardless of stored data:
@@ -293,6 +300,7 @@ export class DistributedTable<
 	}
 
 	async *scan(options?: ScanOptions): AsyncIterable<T> {
+		this.assertIdentityAccess('scan');
 		let count = 0;
 		for (const item of this.data.values()) {
 			yield (await this.reconcileRead(item)) as T;
@@ -309,6 +317,7 @@ export class DistributedTable<
 	 *   sustained throttling. The local mock never throttles, so it does not throw this.
 	 */
 	async getBatch(keys: TableKey<T, K>[]): Promise<(T | null)[]> {
+		this.assertIdentityAccessForKeys('getBatch', keys);
 		return Promise.all(
 			keys.map(key => this.reconcileRead(this.data.get(this.serializeKey(key)) ?? null)),
 		);
@@ -322,6 +331,7 @@ export class DistributedTable<
 	 *   sustained throttling. The local mock never throttles, so it does not throw this.
 	 */
 	async putBatch(items: T[]): Promise<void> {
+		this.assertIdentityAccessForKeys('putBatch', items);
 		for (const item of items) {
 			await validateSchema(this.schema, item);
 			const serialized = JSON.stringify(item);
@@ -343,6 +353,7 @@ export class DistributedTable<
 	 *   sustained throttling. The local mock never throttles, so it does not throw this.
 	 */
 	async deleteBatch(keys: TableKey<T, K>[]): Promise<void> {
+		this.assertIdentityAccessForKeys('deleteBatch', keys);
 		for (const key of keys) this.data.delete(this.serializeKey(key));
 		this.flushToDisk();
 	}
@@ -404,6 +415,25 @@ export class DistributedTable<
 		return JSON.stringify(parts);
 	}
 
+	private partitionKeyValue(value: TableKey<T, K> | T): string {
+		return String((value as Record<string, unknown>)[this.keyConfig.partitionKey]);
+	}
+
+	private assertIdentityAccess(operation: DistributedTableOperation, partitionKey?: unknown): void {
+		assertResourceIdentityAccess(this, operation, partitionKey === undefined ? undefined : String(partitionKey));
+	}
+
+	private assertIdentityAccessForKeys(
+		operation: DistributedTableOperation,
+		keys: readonly (TableKey<T, K> | T)[],
+	): void {
+		if (keys.length === 0) {
+			this.assertIdentityAccess(operation);
+			return;
+		}
+		for (const key of keys) this.assertIdentityAccess(operation, this.partitionKeyValue(key));
+	}
+
 	private loadFromDisk(): Map<string, T> {
 		if (!existsSync(this.filePath)) return new Map();
 		try {
@@ -424,4 +454,3 @@ export class DistributedTable<
 import type { PartitionKeyCondition, SortKeyCondition as SKC, KeyCondition, QueryOptions } from './types.js';
 import { Logger } from '@aws-blocks/bb-logger';
 import type { ChildLogger } from '@aws-blocks/bb-logger';
-

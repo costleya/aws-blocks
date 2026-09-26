@@ -17,27 +17,32 @@
  * `CreateIdentityProvider`. The synthesized template therefore contains no
  * native IdP resource and no `ssm-secure` reference — only the parameter names.
  */
-import { test, afterEach } from 'node:test';
 import assert from 'node:assert';
-import * as cdk from 'aws-cdk-lib';
-import type { Construct } from 'constructs';
-import { Template, Match } from 'aws-cdk-lib/assertions';
-import { Scope, DEFAULT_NODE_RUNTIME } from '@aws-blocks/core/cdk';
+import { afterEach, test } from 'node:test';
 import { SECRETS_BULK_CONSTRUCT_ID } from '@aws-blocks/bb-app-setting';
+import { DEFAULT_NODE_RUNTIME, Scope } from '@aws-blocks/core/cdk';
+import * as cdk from 'aws-cdk-lib';
+import { Match, Template } from 'aws-cdk-lib/assertions';
+import type { Construct } from 'constructs';
 import { AuthOIDC, cognitoFederated, google } from './index.cdk.js';
 import type { AppSettingLike } from './providers.js';
 
 class StubBlocksStack extends cdk.Stack {
 	public readonly handler: cdk.aws_lambda.Function;
+	public readonly executionRole: cdk.aws_iam.Role;
 	public readonly id: string;
 	constructor(scope: Construct, id: string) {
 		super(scope, id);
 		this.id = id;
 		(globalThis as any).CURRENT_BLOCKS_STACK = this;
+		this.executionRole = new cdk.aws_iam.Role(this, 'BlocksRole', {
+			assumedBy: new cdk.aws_iam.ServicePrincipal('lambda.amazonaws.com'),
+		});
 		this.handler = new cdk.aws_lambda.Function(this, 'StubHandler', {
 			runtime: DEFAULT_NODE_RUNTIME,
 			handler: 'index.handler',
 			code: cdk.aws_lambda.Code.fromInline('exports.handler = async () => {};'),
+			role: this.executionRole,
 		});
 	}
 }
@@ -101,30 +106,32 @@ test('CDK: cognitoFederated() registers the IdP via a custom resource that names
 });
 
 test('CDK: the IdP custom resource depends on BlocksSecretsBulk when present (param exists before the read)', () => {
-	// A real BlocksStack has bb-app-setting's shared `BlocksSecretsBulk` resource
-	// (it writes every secret AppSetting's SecureString). The plain test stub does
-	// not model that, so stand one in with the same construct id; AuthOIDC should
-	// wire a dependency onto it so the credential parameters exist before the
-	// handler reads them.
-	const TOKEN = 'arn:aws:lambda:us-east-1:1:function:x';
 	const { stack, parent } = setup();
-	new cdk.CustomResource(stack, SECRETS_BULK_CONSTRUCT_ID, { serviceToken: TOKEN });
 	new AuthOIDC(parent, 'auth', {
 		providers: [
 			cognitoFederated({
-				name: 'google', identityProvider: 'Google', cognitoDomain: 'myapp-abc123', region: 'us-east-1',
-				clientId: appSettingStub('app-google-client-id'), clientSecret: appSettingStub('app-google-client-secret'),
+				name: 'google',
+				identityProvider: 'Google',
+				cognitoDomain: 'myapp-abc123',
+				region: 'us-east-1',
+				clientId: appSettingStub('app-google-client-id'),
+				clientSecret: appSettingStub('app-google-client-secret'),
 			}),
 		],
 	});
+	const bulkResource = stack.node.tryFindChild(SECRETS_BULK_CONSTRUCT_ID)?.node.defaultChild;
+	assert.ok(bulkResource instanceof cdk.CfnResource, 'AppSetting should create the bulk secret-init resource');
+	const bulkLogicalId = stack.getLogicalId(bulkResource);
 	const template = Template.fromStack(stack);
 	const crs = template.findResources('AWS::CloudFormation::CustomResource');
-	const bulkLogicalId = Object.keys(crs).find((k) => crs[k].Properties?.ServiceToken === TOKEN);
-	assert.ok(bulkLogicalId, 'stand-in BlocksSecretsBulk should be in the template');
+	assert.ok(
+		Array.isArray(crs[bulkLogicalId]?.Properties?.Parameters),
+		'bulk secret-init resource should be in the template',
+	);
 	const idpEntry = Object.entries(crs).find(([, r]: [string, any]) => r.Properties?.ProviderName === 'Google');
 	assert.ok(idpEntry, 'IdP custom resource should exist');
-	const dependsOn: string[] = (idpEntry![1] as any).DependsOn ?? [];
-	assert.ok(dependsOn.includes(bulkLogicalId as string), 'IdP CR must depend on the bulk secret-init resource');
+	const dependsOn: string[] = (idpEntry[1] as any).DependsOn ?? [];
+	assert.ok(dependsOn.includes(bulkLogicalId), 'IdP CR must depend on the bulk secret-init resource');
 });
 
 test('CDK: the IdP-registration Lambda is granted cognito-idp, ssm:GetParameter and scoped kms:Decrypt', () => {
@@ -147,7 +154,9 @@ test('CDK: the IdP-registration Lambda is granted cognito-idp, ssm:GetParameter 
 			Statement: Match.arrayWith([
 				Match.objectLike({
 					Action: 'kms:Decrypt',
-					Condition: Match.objectLike({ StringEquals: Match.objectLike({ 'kms:ViaService': Match.anyValue() }) }),
+					Condition: Match.objectLike({
+						StringEquals: Match.objectLike({ 'kms:ViaService': Match.anyValue() }),
+					}),
 				}),
 			]),
 		},
@@ -175,8 +184,12 @@ function idpProps(provider: Parameters<typeof cognitoFederated>[0]): any {
 
 test('CDK: Facebook provider maps to ProviderType=Facebook, scopes "public_profile email"', () => {
 	const cr = idpProps({
-		name: 'fb', identityProvider: 'Facebook', cognitoDomain: 'd1', region: 'us-east-1',
-		clientId: appSettingStub('fb-id'), clientSecret: appSettingStub('fb-secret'),
+		name: 'fb',
+		identityProvider: 'Facebook',
+		cognitoDomain: 'd1',
+		region: 'us-east-1',
+		clientId: appSettingStub('fb-id'),
+		clientSecret: appSettingStub('fb-secret'),
 	});
 	assert.strictEqual(cr.Properties.ProviderType, 'Facebook');
 	assert.strictEqual(cr.Properties.ProviderDetails.authorize_scopes, 'public_profile email');
@@ -184,8 +197,12 @@ test('CDK: Facebook provider maps to ProviderType=Facebook, scopes "public_profi
 
 test('CDK: LoginWithAmazon provider maps to ProviderType=LoginWithAmazon, scopes "profile"', () => {
 	const cr = idpProps({
-		name: 'amzn', identityProvider: 'LoginWithAmazon', cognitoDomain: 'd2', region: 'us-east-1',
-		clientId: appSettingStub('amzn-id'), clientSecret: appSettingStub('amzn-secret'),
+		name: 'amzn',
+		identityProvider: 'LoginWithAmazon',
+		cognitoDomain: 'd2',
+		region: 'us-east-1',
+		clientId: appSettingStub('amzn-id'),
+		clientSecret: appSettingStub('amzn-secret'),
 	});
 	assert.strictEqual(cr.Properties.ProviderType, 'LoginWithAmazon');
 	assert.strictEqual(cr.Properties.ProviderDetails.authorize_scopes, 'profile');
@@ -193,9 +210,13 @@ test('CDK: LoginWithAmazon provider maps to ProviderType=LoginWithAmazon, scopes
 
 test('CDK: a custom OIDC provider maps to ProviderType=OIDC with oidc_issuer + GET', () => {
 	const cr = idpProps({
-		name: 'corp', identityProvider: 'CorpIdP', idpIssuerUrl: 'https://idp.example.com',
-		cognitoDomain: 'd3', region: 'us-east-1',
-		clientId: appSettingStub('corp-id'), clientSecret: appSettingStub('corp-secret'),
+		name: 'corp',
+		identityProvider: 'CorpIdP',
+		idpIssuerUrl: 'https://idp.example.com',
+		cognitoDomain: 'd3',
+		region: 'us-east-1',
+		clientId: appSettingStub('corp-id'),
+		clientSecret: appSettingStub('corp-secret'),
 	});
 	assert.strictEqual(cr.Properties.ProviderType, 'OIDC');
 	assert.strictEqual(cr.Properties.ProviderDetails.oidc_issuer, 'https://idp.example.com');
@@ -205,18 +226,27 @@ test('CDK: a custom OIDC provider maps to ProviderType=OIDC with oidc_issuer + G
 test('CDK: two providers with the same identityProvider fail fast at synth', () => {
 	const { parent } = setup();
 	assert.throws(
-		() => new AuthOIDC(parent, 'auth', {
-			providers: [
-				cognitoFederated({
-					name: 'g1', identityProvider: 'Google', cognitoDomain: 'd', region: 'us-east-1',
-					clientId: appSettingStub('g1-id'), clientSecret: appSettingStub('g1-secret'),
-				}),
-				cognitoFederated({
-					name: 'g2', identityProvider: 'Google', cognitoDomain: 'd', region: 'us-east-1',
-					clientId: appSettingStub('g2-id'), clientSecret: appSettingStub('g2-secret'),
-				}),
-			],
-		}),
+		() =>
+			new AuthOIDC(parent, 'auth', {
+				providers: [
+					cognitoFederated({
+						name: 'g1',
+						identityProvider: 'Google',
+						cognitoDomain: 'd',
+						region: 'us-east-1',
+						clientId: appSettingStub('g1-id'),
+						clientSecret: appSettingStub('g1-secret'),
+					}),
+					cognitoFederated({
+						name: 'g2',
+						identityProvider: 'Google',
+						cognitoDomain: 'd',
+						region: 'us-east-1',
+						clientId: appSettingStub('g2-id'),
+						clientSecret: appSettingStub('g2-secret'),
+					}),
+				],
+			}),
 		/duplicate cognitoFederated identityProvider 'Google'/,
 	);
 });

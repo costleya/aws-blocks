@@ -7,7 +7,7 @@
  */
 
 import { type ScopeParent, registerSdkIdentifiers, getSdkIdentifiers } from '@aws-blocks/core';
-import { getMockDataDir } from '@aws-blocks/core/bb-utils';
+import { getMockDataDir, markSystemIdentityScope } from '@aws-blocks/core/bb-utils';
 import { resolveCookieSecurity } from '@aws-blocks/auth-common/cookies';
 import { KVStore } from '@aws-blocks/bb-kv-store';
 import { AuthOIDC as AuthOIDCBase, DEFAULT_CALLBACK_PATH } from './auth-oidc.js';
@@ -65,6 +65,7 @@ export class AuthOIDC<
 
 	constructor(scope: ScopeParent, id: string, options: AuthOIDCOptions<P>) {
 		const sessions = new KVStore<SessionRow>(scope, `${id}-sessions`);
+		markSystemIdentityScope(sessions);
 
 		const cookieNamePrefix = `oidc_${mockPrefix(scope, id)}`;
 		const cookieAttributes = {

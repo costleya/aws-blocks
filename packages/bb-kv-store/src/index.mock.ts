@@ -1,33 +1,43 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Scope, registerSdkIdentifiers, ApiError } from '@aws-blocks/core';
-import type { ScopeParent } from '@aws-blocks/core';
-import { Logger } from '@aws-blocks/bb-logger';
-import type { ChildLogger } from '@aws-blocks/bb-logger';
-import { getMockDataDir } from '@aws-blocks/core/bb-utils';
-import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { ChildLogger } from '@aws-blocks/bb-logger';
+import { Logger } from '@aws-blocks/bb-logger';
+import type { ScopeParent } from '@aws-blocks/core';
+import { ApiError, registerSdkIdentifiers, Scope } from '@aws-blocks/core';
+import {
+	assertResourceIdentityAccess,
+	getMockDataDir,
+	registerResourceIdentityAccess,
+} from '@aws-blocks/core/bb-utils';
+import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { BB_NAME, BB_VERSION } from './version.js';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
-export {
-	KVStoreErrors,
-} from './errors.js';
+export { KVStoreErrors } from './errors.js';
 export type {
-	ConditionalWriteOptions,
 	ConditionalDeleteOptions,
-	PutOptions,
-	KVStoreOptions,
+	ConditionalWriteOptions,
 	ExternalTableRef,
+	KVStoreOperation,
+	KVStoreOptions,
+	PutOptions,
 	ScanOptions,
 } from './types.js';
 
-import type { ConditionalDeleteOptions, PutOptions, KVStoreOptions, ExternalTableRef, ScanOptions } from './types.js';
 import { KVStoreErrors } from './errors.js';
 import { isExpired, nowEpochSeconds, resolveTtlEpochSeconds } from './ttl.js';
+import type {
+	ConditionalDeleteOptions,
+	ExternalTableRef,
+	KVStoreOperation,
+	KVStoreOptions,
+	PutOptions,
+	ScanOptions,
+} from './types.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -127,6 +137,7 @@ export class KVStore<T = string> extends Scope {
 		this.filePath = join(getMockDataDir(this), 'store.json');
 		this.data = this.loadFromDisk();
 		this.schema = options?.schema;
+		registerResourceIdentityAccess<KVStoreOperation>(this, options?.identityAccess ?? []);
 		this.log = options?.logger ?? new Logger(this, 'logger', { level: 'error' });
 		registerSdkIdentifiers(this.fullId, { tableName: `mock-${this.fullId}`.substring(0, 255) });
 	}
@@ -141,6 +152,7 @@ export class KVStore<T = string> extends Scope {
 	 * @returns The value, or `null` if the key does not exist or has expired.
 	 */
 	async get(key: string): Promise<T | null> {
+		assertResourceIdentityAccess(this, 'get', key);
 		const entry = this.data.get(key);
 		if (entry === undefined) return null;
 		if (isExpired(entry.ttl)) {
@@ -166,6 +178,7 @@ export class KVStore<T = string> extends Scope {
 	 * @throws {KVStoreErrors.ValidationFailed} If both `ttlSeconds` and `expiresAt` are set, or either is not a usable time.
 	 */
 	async put(key: string, value: T, options?: PutOptions<T>): Promise<void> {
+		assertResourceIdentityAccess(this, 'put', key);
 		// Schema validation runs first (matches AWS entry which validates client-side before sending)
 		await validateSchema(this.schema, value);
 
@@ -202,9 +215,12 @@ export class KVStore<T = string> extends Scope {
 			}
 		}
 
-		this.data.set(key, expiresAtEpochSeconds === undefined
-			? { value: serialized }
-			: { value: serialized, ttl: expiresAtEpochSeconds });
+		this.data.set(
+			key,
+			expiresAtEpochSeconds === undefined
+				? { value: serialized }
+				: { value: serialized, ttl: expiresAtEpochSeconds },
+		);
 		this.flushToDisk();
 	}
 
@@ -217,6 +233,7 @@ export class KVStore<T = string> extends Scope {
 	 * @throws {KVStoreErrors.ConditionalCheckFailed} If `ifValueEquals` is set and the current value does not match. Serializes to HTTP 409 (Conflict), retriable (optimistic-lock conflict — re-read and retry).
 	 */
 	async delete(key: string, conditions?: ConditionalDeleteOptions<T>): Promise<void> {
+		assertResourceIdentityAccess(this, 'delete', key);
 		// Existence assertion wins (see put): `ifExists` makes a conflict
 		// non-retriable even when combined with an `ifValueEquals` value check.
 		const retriable = conditions?.ifValueEquals !== undefined && !conditions?.ifExists;
@@ -241,6 +258,7 @@ export class KVStore<T = string> extends Scope {
 	 * @returns An async iterable of key-value entries.
 	 */
 	async *scan(options?: ScanOptions): AsyncIterable<{ key: string; value: T }> {
+		assertResourceIdentityAccess(this, 'scan');
 		if (options?.includeExpired) {
 			for (const [key, entry] of this.data) {
 				yield { key, value: JSON.parse(entry.value) as T };

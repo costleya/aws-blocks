@@ -124,6 +124,13 @@ The WebSocket stage adopts the stack-wide `BlocksDefaults`:
 
 ### DynamoDB Connections Table
 
+The connections table is framework metadata, not application data. It is marked
+for system access so WebSocket connect, disconnect, subscription, and cleanup
+events can maintain routing rows without an RPC request identity. Realtime never
+forwards credentials through a WebSocket message. Applications authorize a
+channel before returning its handle, and background callbacks that access
+identity-protected resources run without an active identity and fail closed.
+
 ```
 PK:  connectionId  (String)
 SK:  channel       (String)    — "__connection__" for sentinel, channel path for subscriptions

@@ -46,7 +46,7 @@
   "scripts": {
     "prebuild": "node ../../scripts/generate-version.mjs LambdaCompute",
     "build": "tsc --build",
-    "test": "node --test dist/index.cdk.test.js dist/compute-resolution.test.js dist/tracing.cdk.test.js"
+    "test": "node --max-old-space-size=512 --test --test-concurrency=1 --test-timeout=30000 dist/index.cdk.test.js dist/compute-resolution.test.js dist/tracing.cdk.test.js"
   },
   "dependencies": {
     "@aws-blocks/core": "^0.5.0"

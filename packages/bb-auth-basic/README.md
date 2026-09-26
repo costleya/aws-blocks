@@ -8,6 +8,10 @@ Simple username/password authentication with JWT sessions, password policy, and 
 
 > Design & mock parity details: [DESIGN.md](./DESIGN.md)
 
+## System auth storage
+
+AuthBasic owns its user records, verification codes, and signing secret. Its private user and verification-code stores use the Lambda execution role even when an application compute is identity-scoped, because authentication must establish identity before application identity credentials exist. This marker applies only to AuthBasic's nested storage; it does not authenticate requests or grant application data access.
+
 ## Quick Start
 
 ```typescript

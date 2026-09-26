@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Scope, type ScopeParent, type BlocksContext, ApiNamespace, ApiError, DEFAULT_API_ERROR_NAME } from '@aws-blocks/core';
-import { constantTimeEquals } from '@aws-blocks/core/bb-utils';
+import { constantTimeEquals, withSystemIdentityScope } from '@aws-blocks/core/bb-utils';
 import { KVStore } from '@aws-blocks/bb-kv-store';
 import { AppSetting } from '@aws-blocks/bb-app-setting';
 import type { BlocksAuth, AuthUser, AuthState, AuthActionInput } from '@aws-blocks/auth-common';
@@ -163,9 +163,9 @@ export class AuthBasic extends Scope implements BlocksAuth {
 	constructor(scope: ScopeParent, id: string, options?: AuthBasicOptions) {
 		super(id, { parent: scope, bbName: BB_NAME, bbVersion: BB_VERSION });
 		this.log = options?.logger ?? new Logger(this, 'logger', { level: 'error' });
-		this.users = new KVStore(this, 'users');
+		this.users = withSystemIdentityScope(this, () => new KVStore(this, 'users'));
 		this.jwtSecret = new AppSetting(this, 'jwt-secret', { secret: true });
-		this.codes = new KVStore(this, 'codes');
+		this.codes = withSystemIdentityScope(this, () => new KVStore(this, 'codes'));
 		this.sessionDuration = options?.sessionDuration ?? 86400;
 		this.passwordPolicy = options?.passwordPolicy ?? {};
 		this.codeDelivery = options?.codeDelivery;

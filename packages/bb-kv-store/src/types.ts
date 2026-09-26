@@ -1,12 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ChildLogger } from '@aws-blocks/bb-logger';
+import type { IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 /**
  * Shared types for KVStore. Imported by mock, aws, cdk, and browser entry points.
  * This file has zero runtime dependencies — types only.
  */
 import type { StandardSchemaV1 } from '@standard-schema/spec';
-import type { ChildLogger } from '@aws-blocks/bb-logger';
 
 export interface ConditionalWriteOptions<T = unknown> {
 	/** Only write if the key does not already exist. */
@@ -82,11 +83,21 @@ export interface ConditionalDeleteOptions<T = unknown> {
 	ifValueEquals?: T;
 }
 
+/** Operations that an identity resource grant can authorize for a KVStore. */
+export type KVStoreOperation = 'get' | 'put' | 'delete' | 'scan';
+
 export interface KVStoreOptions<T = string> {
 	/** Runtime schema for value validation on `put`. Accepts any StandardSchemaV1 implementation (Zod, Valibot, ArkType, etc.). When provided, the type parameter `T` is inferred from the schema. */
 	schema?: StandardSchemaV1<T>;
 	/** Wrap an existing DynamoDB table instead of creating one. */
 	table?: ExternalTableRef;
+	/**
+	 * Identity operations this store permits when its compute has an identity
+	 * provider. Grants belong to the resource: declare the supported KVStore
+	 * operations, access level, and optional key patterns. An omitted
+	 * `keyPatterns` grants its listed operations for every key.
+	 */
+	identityAccess?: readonly IdentityResourceGrant<KVStoreOperation>[];
 	/**
 	 * Optional logger for internal KVStore operations. Accepts a `Logger`
 	 * instance or any `ChildLogger` from `@aws-blocks/bb-logger`.

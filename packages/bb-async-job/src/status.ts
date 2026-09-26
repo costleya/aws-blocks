@@ -4,6 +4,7 @@
 import { DistributedTable, DistributedTableErrors } from '@aws-blocks/bb-distributed-table';
 import { isBlocksError } from '@aws-blocks/core';
 import type { ScopeParent } from '@aws-blocks/core';
+import { type IdentityResourceScope, withSystemIdentityScope } from '@aws-blocks/core/bb-utils';
 import type { ChildLogger } from '@aws-blocks/bb-logger';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import type {
@@ -149,11 +150,13 @@ export class JobStatusTracker {
 	private table: DistributedTable<StatusRecord, { partitionKey: 'jobId' }>;
 	private log?: ChildLogger;
 
-	constructor(scope: ScopeParent, log?: ChildLogger) {
-		this.table = new DistributedTable<StatusRecord, { partitionKey: 'jobId' }>(
-			scope,
-			STATUS_TABLE_ID,
-			statusTableOptions as never,
+	constructor(scope: ScopeParent & IdentityResourceScope, log?: ChildLogger) {
+		this.table = withSystemIdentityScope(scope, () =>
+			new DistributedTable<StatusRecord, { partitionKey: 'jobId' }>(
+				scope,
+				STATUS_TABLE_ID,
+				statusTableOptions as never,
+			),
 		);
 		this.log = log;
 	}

@@ -53,7 +53,7 @@
   "scripts": {
     "prebuild": "node ../../scripts/generate-version.mjs Realtime",
     "build": "tsc --build",
-    "test": "node --test dist/**/*.test.js"
+    "test": "node --test dist/identity-system.test.js dist/identity.aws.test.js dist/index.test.js dist/security.test.js dist/token-scope.test.js dist/ws-server.test.js && node --conditions=cdk --test dist/index.cdk.test.js"
   },
   "dependencies": {
     "@aws-blocks/core": "^0.5.0",

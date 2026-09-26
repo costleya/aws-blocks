@@ -17,7 +17,7 @@ export {
 	secret,
 	type ValueKind,
 } from '@aws-blocks/hosting';
-export { type ApiHandler, ApiNamespace, type BlocksContext } from './api.js';
+export { type ApiHandler, ApiNamespace, type BlocksContext, type BlocksRequestIdentity } from './api.js';
 export type { BlocksVpcOptions, ScopeOptions, SubnetRole, VpcContext, VpcRequirements } from './cdk/index.js';
 export {
 	BlocksBackend,
@@ -36,15 +36,25 @@ export {
 	finalizeDashboards,
 	finalizeTracing,
 	getConfigLocation,
+	getComputeIdentityProvider,
+	getIdentityPoolGuestRole,
+	getIdentityPoolRole,
 	getVpcContext,
 	registerConfig,
 	registerDashboardFinalizer,
+	registerIdentityPoolGuestRole,
+	registerIdentityPoolRole,
+	bindComputeIdentityProvider,
+	grantComputeIdentityAccess,
+	markSystemIdentityScope,
+	withSystemIdentityScope,
 	registerTracer,
 	SandboxDisableDeletionProtection,
 	Scope,
 	SHARED_HANDLER_TIMEOUT_SECONDS,
 	synthGuard,
 } from './cdk/index.js';
+export { interpolateIdentityKeyPatternForIam } from './common/identity-access.js';
 export { _resetConfigCache, getConfig, getConfigSync, loadConfigToProcessEnv, preloadConfig } from './common/config.js';
 export { BlocksStackProps } from './common/index.js';
 export {

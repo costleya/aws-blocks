@@ -15,9 +15,39 @@ Creates a single DynamoDB table:
 - **Table name:** Derived from `scope.fullId` (includes stack name for uniqueness)
 - **Removal policy:** DESTROY (sandbox), configurable for production
 - **Time-to-Live:** Disabled by default; `{ ttl: true }` sets `timeToLiveAttribute: 'ttl'`
-- **Permissions:** `grantReadWriteData` to the parent scope's handler automatically
+- **Permissions:** Stores on an unbound compute grant read/write access to the
+  parent scope's handler automatically. Stores on an identity-bound compute
+  instead grant only the DynamoDB actions declared by `identityAccess` to that
+  compute's identity roles. Key patterns become `dynamodb:LeadingKeys`
+  conditions; a patterned scan grant is rejected because DynamoDB cannot safely
+  constrain a table-wide scan.
 
 No sort key, no GSIs. This is intentional — `KVStore` is the simple case. Customers needing sort keys or secondary indexes should use `DistributedTable`.
+
+## Compute Identity Access
+
+`identityAccess` is a resource declaration for a compute that has an identity
+provider. It does not change KVStore's physical schema or key layout. Each
+grant declares an authenticated or guest access level, its permitted KVStore
+operations, and optional key patterns. Patterns may contain literal
+`${identityId}` and `*`; omitting patterns grants the listed operations for all
+raw keys.
+
+After `assumeForIdentity(context)`, the mock checks each operation and raw key
+against the grant. The AWS runtime relies on the synthesized IAM role policy,
+including `dynamodb:LeadingKeys`, instead of rechecking key patterns locally.
+A failed or expired assumption fails closed. Without an assumption, the
+ordinary client is used even when the compute is bound to the pool.
+
+In AWS, an operation after explicit assumption builds a fresh DynamoDB and
+document client from that request's temporary credentials, then destroys the
+client when the operation completes. It never mutates the ordinary shared
+DynamoDB client. The mock simulates the grant and key-pattern checks without
+serializing credentials.
+
+`scan()` requires an explicit `scan` grant without key patterns. A key-pattern
+condition cannot safely constrain a table-wide scan, so CDK rejects that grant
+shape before synthesis.
 
 ## Expiry (TTL)
 
@@ -55,7 +85,8 @@ When `options.schema` is provided (any `StandardSchemaV1` implementation — Zod
 | No throughput limits | Code that would be throttled in AWS succeeds locally | Document the gap; recommend sandbox testing for throughput-sensitive flows |
 | No item size limit enforcement beyond 400 KB check | Edge cases around DynamoDB marshalling overhead | Mock validates serialized JSON size, which is a close approximation |
 | Immediate consistency (vs eventual) | Reads always reflect the latest write locally | No mitigation — eventual consistency is inherently non-deterministic |
-| No IAM enforcement | Permission errors only surface in AWS | No mitigation at mock level — IAM is handled by CDK grants automatically |
+| No IAM evaluation | The mock simulates `identityAccess` grants after explicit assumption, but cannot prove AWS IAM policy evaluation | Check synthesized policies and verify deployed IAM separately when required |
 | Disk I/O vs DynamoDB latency | Local ops are faster and never timeout | No mitigation needed — latency differences don't affect correctness |
 | TTL deletion is immediate on read (vs up to 48 h in DynamoDB) | An expired item's storage is reclaimed sooner locally | Both layers hide expired items from `get`/`scan`, so observable behavior matches; only physical deletion timing differs |
 | Conditional-write composition | When both `ifNotExists` and `ifValueEquals` are set, both runtimes compose them with OR (`attribute_not_exists(pk) OR value = :expected`) — write succeeds if the key is absent OR its value matches (create-or-update) | No mitigation needed — mock and AWS are aligned. (Previously the two layers diverged: AWS silently ignored `ifValueEquals`; the mock rejected the write.) |
+| Compute identity credentials | The mock simulates explicit identity grants and key patterns but does not create temporary AWS credentials or evaluate IAM | Run AWS-path tests to verify request-scoped credentials and synthesized IAM policies. |

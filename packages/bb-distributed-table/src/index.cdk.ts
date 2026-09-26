@@ -11,14 +11,49 @@ import { LogGroup, type RetentionDays } from 'aws-cdk-lib/aws-logs';
 import { Provider } from 'aws-cdk-lib/custom-resources';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { Key, type IKey } from 'aws-cdk-lib/aws-kms';
-import { BuildingBlockScope, synthGuard, DEFAULT_NODE_RUNTIME } from '@aws-blocks/core/cdk';
+import {
+	BuildingBlockScope,
+	DEFAULT_NODE_RUNTIME,
+	getComputeIdentityProvider,
+	grantComputeIdentityAccess,
+	interpolateIdentityKeyPatternForIam,
+	synthGuard,
+} from '@aws-blocks/core/cdk';
 import type { ScopeParent } from '@aws-blocks/core';
-import type { ExternalTableRef, ExternalKmsKeyRef } from './types.js';
+import type { IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
+import type {
+	DistributedTableOperation,
+	ExternalKmsKeyRef,
+	ExternalTableRef,
+} from './types.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 export { DistributedTableErrors } from './errors.js';
-export type { DistributedTableOptions, ReadValidationMode, TableKeyConfig, TableKey, PutOptions, DeleteOptions, QueryOptions, ScanOptions, ExternalTableRef, ExternalKmsKeyRef } from './types.js';
+export type {
+	DeleteOptions,
+	DistributedTableOperation,
+	DistributedTableOptions,
+	ExternalKmsKeyRef,
+	ExternalTableRef,
+	PutOptions,
+	QueryOptions,
+	ReadValidationMode,
+	ScanOptions,
+	TableKey,
+	TableKeyConfig,
+} from './types.js';
+
+const IDENTITY_OPERATION_ACTIONS: Record<DistributedTableOperation, readonly string[]> = {
+	get: ['dynamodb:GetItem'],
+	put: ['dynamodb:PutItem'],
+	delete: ['dynamodb:DeleteItem'],
+	query: ['dynamodb:Query'],
+	scan: ['dynamodb:Scan'],
+	getBatch: ['dynamodb:BatchGetItem'],
+	putBatch: ['dynamodb:BatchWriteItem'],
+	deleteBatch: ['dynamodb:BatchWriteItem'],
+};
 
 export class DistributedTable<T = any> extends BuildingBlockScope {
 	private table: ITable;
@@ -72,11 +107,7 @@ export class DistributedTable<T = any> extends BuildingBlockScope {
 				);
 			}
 			this.table = Table.fromTableName(this, 'table', config.table.tableName);
-			this.table.grantReadWriteData(this.executionRole);
-			this.executionRole.addToPrincipalPolicy(new PolicyStatement({
-				actions: ['dynamodb:Query'],
-				resources: [`${this.table.tableArn}/index/*`],
-			}));
+			this.grantDataAccess(config.identityAccess);
 			return;
 		}
 
@@ -231,13 +262,7 @@ export class DistributedTable<T = any> extends BuildingBlockScope {
 			encryptionKey,
 		});
 
-		this.table.grantReadWriteData(this.executionRole);
-
-		// Explicit index query permissions
-		this.executionRole.addToPrincipalPolicy(new PolicyStatement({
-			actions: ['dynamodb:Query'],
-			resources: [`${this.table.tableArn}/index/*`],
-		}));
+		this.grantDataAccess(config.identityAccess);
 
 		// Add GSI manager if indexes are defined
 		if (config.indexes && Object.keys(config.indexes).length > 0) {
@@ -284,6 +309,54 @@ export class DistributedTable<T = any> extends BuildingBlockScope {
 	getBatch(..._args: unknown[]): never { return synthGuard('DistributedTable', 'getBatch'); }
 	putBatch(..._args: unknown[]): never { return synthGuard('DistributedTable', 'putBatch'); }
 	deleteBatch(..._args: unknown[]): never { return synthGuard('DistributedTable', 'deleteBatch'); }
+
+	private grantDataAccess(identityAccess: readonly IdentityResourceGrant<DistributedTableOperation>[] | undefined): void {
+		for (const grant of identityAccess ?? []) {
+			if (grant.operations.includes('scan') && grant.keyPatterns !== undefined) {
+				throw new Error('DistributedTable scan identity access cannot declare keyPatterns.');
+			}
+		}
+
+		if (!getComputeIdentityProvider(this)) {
+			this.table.grantReadWriteData(this.executionRole);
+			this.executionRole.addToPrincipalPolicy(new PolicyStatement({
+				actions: ['dynamodb:Query'],
+				resources: [`${this.table.tableArn}/index/*`],
+			}));
+			return;
+		}
+
+		for (const grant of identityAccess ?? []) {
+			const actions = Array.from(new Set(grant.operations.flatMap(operation => IDENTITY_OPERATION_ACTIONS[operation])));
+			const resources = actions.includes('dynamodb:Query')
+				? [this.table.tableArn, `${this.table.tableArn}/index/*`]
+				: [this.table.tableArn];
+			const conditions = grant.keyPatterns
+				? {
+					'ForAllValues:StringLike': {
+						'dynamodb:LeadingKeys': grant.keyPatterns.map(interpolateIdentityKeyPatternForIam),
+					},
+					Null: { 'dynamodb:LeadingKeys': 'false' },
+				}
+				: undefined;
+			grantComputeIdentityAccess(this, grant.access, role => {
+				role.addToPrincipalPolicy(new PolicyStatement({ actions, resources, conditions }));
+				// Preserve the key permissions supplied by CDK's ordinary table grants,
+				// while keeping the DynamoDB actions and LeadingKeys conditions above.
+				if (actions.length > 0 && this.table.encryptionKey) {
+					const writes = actions.some(action =>
+						['dynamodb:PutItem', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem'].includes(action),
+					);
+					this.table.encryptionKey.grant(
+						role,
+						'kms:Decrypt',
+						'kms:DescribeKey',
+						...(writes ? ['kms:Encrypt', 'kms:ReEncrypt*', 'kms:GenerateDataKey*'] : []),
+					);
+				}
+			});
+		}
+	}
 }
 
 // ── Shared GSI Manager Provider (one per stack) ─────────────────────────────

@@ -41,7 +41,7 @@ A Block is a module that gives you a complete feature: cloud resources, a runtim
 | Category | Blocks |
 | --- | --- |
 | Data & storage | `KVStore`, `DistributedTable`, `Database`, `DistributedDatabase`, `FileBucket` |
-| Authentication | `AuthBasic`, `AuthCognito`, `AuthOIDC` |
+| Authentication | `AuthBasic`, `AuthCognito`, `AuthOIDC`, `IdentityPool` |
 | Compute & background | `AsyncJob`, `CronJob` |
 | AI | `Agent`, `KnowledgeBase` |
 | Communication | `Realtime`, `EmailClient` |

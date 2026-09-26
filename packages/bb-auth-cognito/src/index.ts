@@ -19,7 +19,7 @@ import {
 	Scope,
 	registerSdkIdentifiers,
 } from '@aws-blocks/core';
-import { getMockDataDir } from '@aws-blocks/core/bb-utils';
+import { getMockDataDir, withSystemIdentityScope } from '@aws-blocks/core/bb-utils';
 import type { BlocksContext, ScopeParent } from '@aws-blocks/core';
 import type { AuthActionInput, AuthState, AuthStateApi, BlocksAuth } from '@aws-blocks/auth-common';
 import { decodeIdToken, decodeJwtPayload, jwtExpMs, safeStringClaim, sessionToTokens, SessionStore, type SessionRecord } from './sessions.js';
@@ -248,7 +248,7 @@ export class AuthCognito<const O extends AuthCognitoMockOptions = AuthCognitoMoc
 		}
 		this.sessionDuration = this.options.sessionTtlSeconds ?? DEFAULT_SESSION_TTL_SECONDS;
 		this.crossDomain = this.options.crossDomain ?? false;
-		this.sessions = new SessionStore(this, 'sessions', this.sessionDuration);
+		this.sessions = withSystemIdentityScope(this, () => new SessionStore(this, 'sessions', this.sessionDuration));
 		this.stateFile = join(getMockDataDir(this), 'state.json');
 		this.state = this.loadFromDisk();
 		this.challenges = new Map(Object.entries(this.state.challenges));

@@ -26,6 +26,8 @@ from the IdP and POSTs it to `/aws-blocks/auth/exchange`.
 Two engines implement the `AuthEngine` interface. Both share a `SessionManager`
 for session persistence, cookie management, and the CAS-based refresh protocol.
 
+The session store is auth-owned system data. AuthOIDC constructs its private CDK session store in a temporary system-identity scope; its mock and AWS runtime mark the already-created private session store without changing its full ID or name. It therefore retains Lambda execution-role access when the surrounding compute is identity-scoped. This exception does not authenticate requests or grant application data access.
+
 ```
                     ┌─────────────────────┐
                     │   SessionManager    │

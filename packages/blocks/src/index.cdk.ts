@@ -1,6 +1,11 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+export type { IdentityPoolOptions, IdentityPoolUser } from '@aws-blocks/bb-identity-pool';
+export { IdentityPool, IdentityPoolErrors } from '@aws-blocks/bb-identity-pool';
+export type { IdentityPoolReference, LambdaComputeProps } from '@aws-blocks/bb-lambda-compute';
+export { LambdaCompute } from '@aws-blocks/bb-lambda-compute';
+export type { IdentityAccess, IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 // CDK build - re-export CDK versions
 // Pipeline (and all other CDK constructs) are re-exported via the wildcard below.
 // Note: BlocksStack / BlocksBackend from this wildcard are shadowed below by
@@ -133,6 +138,7 @@ export type { DistributedDatabaseOptions, TransactionOptions } from '@aws-blocks
 export { DistributedDatabase, DistributedDatabaseErrors } from '@aws-blocks/bb-distributed-data';
 export type {
 	DeleteOptions as DTDeleteOptions,
+	DistributedTableOperation,
 	DistributedTableOptions,
 	PutOptions as DTPutOptions,
 	QueryOptions as DTQueryOptions,
@@ -147,6 +153,7 @@ export { EmailClient, EmailErrors } from '@aws-blocks/bb-email-client';
 export type {
 	CorsRule,
 	ExternalBucketRef as FBExternalBucketRef,
+	FileBucketOperation,
 	FileBucketOptions,
 	FileContent,
 	FileInfo,
@@ -160,6 +167,7 @@ export { FileBucket, FileBucketErrors } from '@aws-blocks/bb-file-bucket';
 export type {
 	ChunkingConfig,
 	ChunkingStrategy,
+	KnowledgeBaseOperation,
 	KnowledgeBaseOptions,
 	MetadataFilter,
 	RetrieveOptions,
@@ -172,6 +180,7 @@ export type {
 	ConditionalDeleteOptions,
 	ConditionalWriteOptions,
 	ExternalTableRef,
+	KVStoreOperation,
 	KVStoreOptions,
 	PutOptions as KVPutOptions,
 } from '@aws-blocks/bb-kv-store';

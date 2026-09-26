@@ -71,7 +71,7 @@ import {
 	getSdkIdentifiers,
 } from '@aws-blocks/core';
 import type { BlocksContext, ScopeParent } from '@aws-blocks/core';
-import { constantTimeEquals } from '@aws-blocks/core/bb-utils';
+import { constantTimeEquals, withSystemIdentityScope } from '@aws-blocks/core/bb-utils';
 import { BB_NAME, BB_VERSION } from './version.js';
 import { AppSetting } from '@aws-blocks/bb-app-setting';
 import type { AuthActionInput, AuthState, AuthStateApi, BlocksAuth } from '@aws-blocks/auth-common';
@@ -656,7 +656,7 @@ export class AuthCognito<const O extends AuthCognitoOptions = AuthCognitoOptions
 		// Defer CognitoJwtVerifier.create until we actually verify a token —
 		// the factory validates userPoolId at construction time and blows up
 		// if it's empty (as happens during client code generation).
-		this.sessions = new SessionStore(this, 'sessions', this.sessionTtlSeconds);
+		this.sessions = withSystemIdentityScope(this, () => new SessionStore(this, 'sessions', this.sessionTtlSeconds));
 		// Nested scope `session-secret` — matches the CDK layer's AppSetting
 		// so both sides derive the same SSM parameter path.
 		this.sessionSecretSetting = new AppSetting(this, 'session-secret', { secret: true });

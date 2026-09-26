@@ -182,7 +182,7 @@ None directly — AuthBasic is a composite Building Block with no CDK construct.
 | `KVStore(this, 'codes')` | DynamoDB table (PAY_PER_REQUEST) | Verification codes: `purpose:username` → `{ hmac, expires }` |
 | `AppSetting(this, 'jwt-secret')` | SSM Parameter (SecureString) | JWT signing secret |
 
-All permissions (DynamoDB read/write, SSM GetParameter) are managed by the composed BBs via the standard Blocks grant mechanism. No additional IAM configuration is needed.
+All permissions (DynamoDB read/write, SSM GetParameter) are managed by the composed BBs via the standard Blocks grant mechanism. No additional IAM configuration is needed. AuthBasic constructs only its private user and code stores in a temporary system-identity scope, so they continue to use the Lambda execution role when the surrounding compute is identity-scoped. This exception covers only the auth-owned user and code records needed to establish identity; it does not authenticate requests or grant application data access.
 
 **Removal policy:** Inherited from composed BBs (DESTROY in sandbox mode).
 

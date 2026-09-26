@@ -20,6 +20,23 @@ describe('AgentErrors', () => {
 	});
 });
 
+describe('identity-bound compute', () => {
+	test('rejects construction before creating AgentCore persistence children', () => {
+		const scope = new Scope('identity-bound-agent', { compute: { identityProviderFullId: 'app/pool' } });
+
+		assert.throws(
+			() => new Agent(scope, 'agent', { systemPrompt: 'test', model: { deployed: { provider: 'canned' }, local: { provider: 'canned' } } }),
+			(error: unknown) => {
+				assert.ok(error instanceof Error);
+				assert.strictEqual(error.name, AgentErrors.IdentityComputeUnsupported);
+				assert.match(error.message, /identity-bound compute/);
+				assert.match(error.message, /AgentCore background runtime/);
+				return true;
+			},
+		);
+	});
+});
+
 // ── createConversationId ────────────────────────────────────────────────────
 
 describe('createConversationId', () => {

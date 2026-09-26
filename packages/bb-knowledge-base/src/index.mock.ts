@@ -1,31 +1,44 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Scope, registerSdkIdentifiers } from '@aws-blocks/core';
-import { getMockDataDir } from '@aws-blocks/core/bb-utils';
-import type { ScopeParent } from '@aws-blocks/core';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, realpathSync } from 'node:fs';
-import { join, relative, dirname, extname, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
-import { buildIndex, search, type TfIdfIndex } from './tfidf.js';
-import type { KnowledgeBaseOptions, RetrieveOptions, RetrieveResult, MetadataFilter, ChunkingStrategy, WaitUntilSyncedOptions } from './types.js';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, extname, join, relative, resolve, sep } from 'node:path';
+import type { ChildLogger } from '@aws-blocks/bb-logger';
+import { Logger } from '@aws-blocks/bb-logger';
+import type { ScopeParent } from '@aws-blocks/core';
+import { registerSdkIdentifiers, Scope } from '@aws-blocks/core';
+import {
+	assertResourceIdentityAccess,
+	getMockDataDir,
+	registerResourceIdentityAccess,
+} from '@aws-blocks/core/bb-utils';
 import { blocksError, KnowledgeBaseErrors } from './errors.js';
 import { normalizeMaxResults } from './normalize.js';
-import { Logger } from '@aws-blocks/bb-logger';
-import type { ChildLogger } from '@aws-blocks/bb-logger';
-import { BB_NAME, BB_VERSION } from './version.js';
-
-export type {
-	KnowledgeBaseOptions,
-	SourceConfig,
-	ChunkingConfig,
+import { buildIndex, search, type TfIdfIndex } from './tfidf.js';
+import type {
 	ChunkingStrategy,
+	KnowledgeBaseOperation,
+	KnowledgeBaseOptions,
+	MetadataFilter,
 	RetrieveOptions,
 	RetrieveResult,
-	MetadataFilter,
 	WaitUntilSyncedOptions,
 } from './types.js';
+import { BB_NAME, BB_VERSION } from './version.js';
+
 export { KnowledgeBaseErrors } from './errors.js';
+export type {
+	ChunkingConfig,
+	ChunkingStrategy,
+	KnowledgeBaseOperation,
+	KnowledgeBaseOptions,
+	MetadataFilter,
+	RetrieveOptions,
+	RetrieveResult,
+	SourceConfig,
+	WaitUntilSyncedOptions,
+} from './types.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -178,6 +191,7 @@ export class KnowledgeBase extends Scope {
 		this.options = options;
 		this.dataDir = getMockDataDir(this);
 		registerSdkIdentifiers(this.fullId, { kbId: `mock-kb-${this.fullId}` });
+		this.registerIdentityAccess();
 	}
 
 	/**
@@ -211,6 +225,7 @@ export class KnowledgeBase extends Scope {
 	 * ```
 	 */
 	async retrieve(query: string, options?: RetrieveOptions): Promise<RetrieveResult[]> {
+		assertResourceIdentityAccess(this, 'retrieve');
 		if (typeof query !== 'string' || !query.trim()) {
 			throw blocksError(KnowledgeBaseErrors.ValidationError, 'Query must be a non-empty string.');
 		}
@@ -259,6 +274,7 @@ export class KnowledgeBase extends Scope {
 	 * @returns Always `true` in local development.
 	 */
 	async isSynced(): Promise<boolean> {
+		assertResourceIdentityAccess(this, 'isSynced');
 		return true;
 	}
 
@@ -272,7 +288,20 @@ export class KnowledgeBase extends Scope {
 	 * @param {WaitUntilSyncedOptions} _options - Accepted for API parity; ignored in local development.
 	 */
 	async waitUntilSynced(_options?: WaitUntilSyncedOptions): Promise<void> {
+		assertResourceIdentityAccess(this, 'waitUntilSynced');
 		// No-op: the local corpus loads synchronously, so there is nothing to wait for.
+	}
+
+	private registerIdentityAccess(): void {
+		if (this.options.identityAccess === undefined) return;
+		for (const grant of this.options.identityAccess ?? []) {
+			if (grant.keyPatterns !== undefined) {
+				throw new Error(
+					'KnowledgeBase identity access cannot declare keyPatterns. Grants apply to the whole knowledge base.',
+				);
+			}
+		}
+		registerResourceIdentityAccess<KnowledgeBaseOperation>(this, this.options.identityAccess);
 	}
 
 	// ── Lazy loading ──────────────────────────────────────────────────────

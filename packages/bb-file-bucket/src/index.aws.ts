@@ -1,38 +1,64 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ChildLogger } from '@aws-blocks/bb-logger';
+import { Logger } from '@aws-blocks/bb-logger';
+import type { ScopeParent } from '@aws-blocks/core';
+import { getSdkIdentifiers, registerSdkIdentifiers, Scope } from '@aws-blocks/core';
+import { captureRequestIdentity, withRequestAwsClient } from '@aws-blocks/core/bb-utils';
 import {
-	S3Client,
-	PutObjectCommand,
-	GetObjectCommand,
+	CopyObjectCommand,
 	DeleteObjectCommand,
 	DeleteObjectsCommand,
+	GetObjectCommand,
 	ListObjectsV2Command,
 	ListObjectVersionsCommand,
-	CopyObjectCommand,
+	PutObjectCommand,
+	S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { Scope, registerSdkIdentifiers, getSdkIdentifiers } from '@aws-blocks/core';
-import type { ScopeParent } from '@aws-blocks/core';
-import { BB_NAME, BB_VERSION } from './version.js';
 import type {
-	FileBucketOptions, PutOptions, PutUrlOptions, ScanOptions,
-	FileContent, FileInfo, ExternalBucketRef,
-	FileDownloadClient, FileUploadClient, FileVersionInfo,
-	GetOptionsFor, DeleteOptionsFor, GetUrlOptionsFor,
+	DeleteOptionsFor,
+	ExternalBucketRef,
+	FileBucketOptions,
+	FileContent,
+	FileDownloadClient,
+	FileInfo,
+	FileUploadClient,
+	FileVersionInfo,
+	GetOptionsFor,
+	GetUrlOptionsFor,
+	PutOptions,
+	PutUrlOptions,
+	ScanOptions,
 } from './types.js';
-import { Logger } from '@aws-blocks/bb-logger';
-import type { ChildLogger } from '@aws-blocks/bb-logger';
+import { BB_NAME, BB_VERSION } from './version.js';
 
 // Re-export public types
 export { FileBucketErrors } from './errors.js';
 export type {
-	FileBucketOptions, PutOptions, GetUrlOptions, PutUrlOptions, ScanOptions,
-	FileContent, FileInfo, CorsRule, LifecycleRule, ExternalBucketRef,
-	FileDownloadClient, FileUploadClient, FileVersionInfo,
-	FileDownloadDescriptor, FileUploadDescriptor,
-	VersionedGetOptions, VersionedDeleteOptions, VersionedGetUrlOptions,
-	GetOptionsFor, DeleteOptionsFor, GetUrlOptionsFor,
+	CorsRule,
+	DeleteOptionsFor,
+	ExternalBucketRef,
+	FileBucketOperation,
+	FileBucketOptions,
+	FileContent,
+	FileDownloadClient,
+	FileDownloadDescriptor,
+	FileInfo,
+	FileUploadClient,
+	FileUploadDescriptor,
+	FileVersionInfo,
+	GetOptionsFor,
+	GetUrlOptions,
+	GetUrlOptionsFor,
+	LifecycleRule,
+	PutOptions,
+	PutUrlOptions,
+	ScanOptions,
+	VersionedDeleteOptions,
+	VersionedGetOptions,
+	VersionedGetUrlOptions,
 } from './types.js';
 
 /**
@@ -75,71 +101,95 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	}
 
 	async put(path: string, body: Buffer | string, options?: PutOptions): Promise<void> {
-		await this.s3.send(new PutObjectCommand({
-			Bucket: getSdkIdentifiers(this).bucketName,
-			Key: path,
-			Body: typeof body === 'string' ? Buffer.from(body) : body,
-			ContentType: options?.contentType,
-			Metadata: options?.metadata,
-			CacheControl: options?.cacheControl,
-		}));
+		await this.withS3Client((s3) =>
+			s3.send(
+				new PutObjectCommand({
+					Bucket: getSdkIdentifiers(this).bucketName,
+					Key: path,
+					Body: typeof body === 'string' ? Buffer.from(body) : body,
+					ContentType: options?.contentType,
+					Metadata: options?.metadata,
+					CacheControl: options?.cacheControl,
+				}),
+			),
+		);
 	}
 
 	async get(path: string, options?: GetOptionsFor<O>): Promise<FileContent | null> {
 		try {
-			const result = await this.s3.send(new GetObjectCommand({
-				Bucket: getSdkIdentifiers(this).bucketName, Key: path,
-				...(options ? { VersionId: (options as any).versionId } : {}),
-			}));
-			const bytes = await result.Body!.transformToByteArray();
-			return {
-				body: Buffer.from(bytes),
-				contentType: result.ContentType ?? 'application/octet-stream',
-				metadata: result.Metadata ?? {},
-				size: result.ContentLength ?? bytes.length,
-			};
+			return await this.withS3Client(async (s3) => {
+				const result = await s3.send(
+					new GetObjectCommand({
+						Bucket: getSdkIdentifiers(this).bucketName,
+						Key: path,
+						...(options ? { VersionId: (options as any).versionId } : {}),
+					}),
+				);
+				// Consume the stream before the request-scoped client is destroyed.
+				if (!result.Body) throw new Error('S3 GetObject response did not include an object body.');
+				const bytes = await result.Body.transformToByteArray();
+				return {
+					body: Buffer.from(bytes),
+					contentType: result.ContentType ?? 'application/octet-stream',
+					metadata: result.Metadata ?? {},
+					size: result.ContentLength ?? bytes.length,
+				};
+			});
 		} catch (e: any) {
 			if (e.name === 'NoSuchKey') return null;
+			if (e.name === 'AccessDenied' && !(options as any)?.versionId) {
+				const result = await this.withS3Client((s3) =>
+					s3.send(
+						new ListObjectsV2Command({
+							Bucket: getSdkIdentifiers(this).bucketName,
+							Prefix: path,
+							MaxKeys: 1,
+						}),
+					),
+				);
+				if (!result.Contents?.some((object) => object.Key === path)) return null;
+			}
 			throw e;
 		}
 	}
 
 	async delete(path: string, options?: DeleteOptionsFor<O>): Promise<void> {
-		await this.s3.send(new DeleteObjectCommand({
-			Bucket: getSdkIdentifiers(this).bucketName, Key: path,
-			...(options ? { VersionId: (options as any).versionId } : {}),
-		}));
+		await this.withS3Client((s3) =>
+			s3.send(
+				new DeleteObjectCommand({
+					Bucket: getSdkIdentifiers(this).bucketName,
+					Key: path,
+					...(options ? { VersionId: (options as any).versionId } : {}),
+				}),
+			),
+		);
 	}
 
 	async deleteBatch(paths: string[]): Promise<void> {
 		const CHUNK_SIZE = 1000;
 		for (let i = 0; i < paths.length; i += CHUNK_SIZE) {
 			const chunk = paths.slice(i, i + CHUNK_SIZE);
-			await this.s3.send(new DeleteObjectsCommand({
-				Bucket: getSdkIdentifiers(this).bucketName,
-				Delete: { Objects: chunk.map(Key => ({ Key })), Quiet: true },
-			}));
+			await this.withS3Client((s3) =>
+				s3.send(
+					new DeleteObjectsCommand({
+						Bucket: getSdkIdentifiers(this).bucketName,
+						Delete: { Objects: chunk.map((Key) => ({ Key })), Quiet: true },
+					}),
+				),
+			);
 		}
 	}
 
 	async getUrl(path: string, options?: GetUrlOptionsFor<O>): Promise<string> {
-		const opts = options as any;
-		return getSignedUrl(this.s3, new GetObjectCommand({
-			Bucket: getSdkIdentifiers(this).bucketName, Key: path,
-			...(opts?.versionId ? { VersionId: opts.versionId } : {}),
-		}), {
-			expiresIn: opts?.expiresIn ?? 3600,
-		});
+		return this.signGetUrl(path, options);
 	}
 
 	async putUrl(path: string, options?: PutUrlOptions): Promise<string> {
-		return getSignedUrl(this.s3, new PutObjectCommand({
-			Bucket: getSdkIdentifiers(this).bucketName, Key: path, ContentType: options?.contentType,
-		}), { expiresIn: options?.expiresIn ?? 3600 });
+		return this.signPutUrl(path, options);
 	}
 
 	async getFileHandle(path: string, options?: GetUrlOptionsFor<O>): Promise<FileDownloadClient> {
-		const url = await this.getUrl(path, options);
+		const url = await this.signGetUrl(path, options);
 		return {
 			download: async () => {
 				const res = await fetch(url);
@@ -152,7 +202,7 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	}
 
 	async createUploadHandle(path: string, options?: PutUrlOptions): Promise<FileUploadClient> {
-		const url = await this.putUrl(path, options);
+		const url = await this.signPutUrl(path, options);
 		const contentType = options?.contentType;
 		return {
 			upload: async (body: Blob | File | ArrayBuffer) => {
@@ -166,14 +216,30 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 		};
 	}
 
-	async *scan(options?: ScanOptions): AsyncIterable<FileInfo> {
+	scan(options?: ScanOptions): AsyncIterable<FileInfo> {
+		return this.scanPages(options, captureRequestIdentity(this));
+	}
+
+	private async *scanPages(
+		options: ScanOptions | undefined,
+		assertRequestIdentity: () => void,
+	): AsyncIterable<FileInfo> {
 		let continuationToken: string | undefined;
 		do {
-			const result = await this.s3.send(new ListObjectsV2Command({
-				Bucket: getSdkIdentifiers(this).bucketName, Prefix: options?.prefix, ContinuationToken: continuationToken,
-			}));
+			assertRequestIdentity();
+			const result = await this.withS3Client((s3) =>
+				s3.send(
+					new ListObjectsV2Command({
+						Bucket: getSdkIdentifiers(this).bucketName,
+						Prefix: options?.prefix,
+						ContinuationToken: continuationToken,
+					}),
+				),
+			);
 			for (const obj of result.Contents ?? []) {
-				yield { path: obj.Key!, size: obj.Size ?? 0, lastModified: obj.LastModified ?? new Date() };
+				if (!obj.Key) continue;
+				assertRequestIdentity();
+				yield { path: obj.Key, size: obj.Size ?? 0, lastModified: obj.LastModified ?? new Date() };
 			}
 			continuationToken = result.NextContinuationToken;
 		} while (continuationToken);
@@ -184,13 +250,21 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 		let keyMarker: string | undefined;
 		let versionIdMarker: string | undefined;
 		do {
-			const result = await this.s3.send(new ListObjectVersionsCommand({
-				Bucket: getSdkIdentifiers(this).bucketName, Prefix: path, KeyMarker: keyMarker, VersionIdMarker: versionIdMarker,
-			}));
+			const result = await this.withS3Client((s3) =>
+				s3.send(
+					new ListObjectVersionsCommand({
+						Bucket: getSdkIdentifiers(this).bucketName,
+						Prefix: path,
+						KeyMarker: keyMarker,
+						VersionIdMarker: versionIdMarker,
+					}),
+				),
+			);
 			for (const v of result.Versions ?? []) {
 				if (v.Key !== path) continue; // prefix match may include other keys
+				if (!v.VersionId) continue;
 				versions.push({
-					versionId: v.VersionId!,
+					versionId: v.VersionId,
 					lastModified: v.LastModified ?? new Date(),
 					size: v.Size ?? 0,
 					isCurrent: v.IsLatest ?? false,
@@ -205,12 +279,61 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	}
 
 	async restoreVersion(path: string, versionId: string): Promise<void> {
-		const encodedPath = path.split('/').map(s => encodeURIComponent(s)).join('/');
-		await this.s3.send(new CopyObjectCommand({
-			Bucket: getSdkIdentifiers(this).bucketName,
-			Key: path,
-			CopySource: `${getSdkIdentifiers(this).bucketName}/${path}?versionId=${versionId}`,
-		}));
+		const encodedPath = path
+			.split('/')
+			.map((s) => encodeURIComponent(s))
+			.join('/');
+		await this.withS3Client((s3) =>
+			s3.send(
+				new CopyObjectCommand({
+					Bucket: getSdkIdentifiers(this).bucketName,
+					Key: path,
+					CopySource: `${getSdkIdentifiers(this).bucketName}/${encodedPath}?versionId=${versionId}`,
+				}),
+			),
+		);
+	}
+
+	private async signGetUrl(path: string, options?: GetUrlOptionsFor<O>): Promise<string> {
+		const opts = options as any;
+		return this.withS3Client((s3) =>
+			getSignedUrl(
+				s3,
+				new GetObjectCommand({
+					Bucket: getSdkIdentifiers(this).bucketName,
+					Key: path,
+					...(opts?.versionId ? { VersionId: opts.versionId } : {}),
+				}),
+				{ expiresIn: opts?.expiresIn ?? 3600 },
+			),
+		);
+	}
+
+	private async signPutUrl(path: string, options?: PutUrlOptions): Promise<string> {
+		return this.withS3Client((s3) =>
+			getSignedUrl(
+				s3,
+				new PutObjectCommand({
+					Bucket: getSdkIdentifiers(this).bucketName,
+					Key: path,
+					ContentType: options?.contentType,
+				}),
+				{ expiresIn: options?.expiresIn ?? 3600 },
+			),
+		);
+	}
+
+	private async withS3Client<R>(callback: (s3: S3Client) => Promise<R>): Promise<R> {
+		return withRequestAwsClient(
+			this,
+			this.s3,
+			(credentials) =>
+				new S3Client({
+					customUserAgent: this.buildUserAgentChain(),
+					credentials,
+				}),
+			callback,
+		);
 	}
 
 	static fromExisting(bucketName: string): ExternalBucketRef {

@@ -1,14 +1,15 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { test, beforeEach, describe } from 'node:test';
+import { test, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert';
 import { rmSync, existsSync, mkdirSync, writeFileSync, cpSync, symlinkSync, mkdtempSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { isBlocksError } from '@aws-blocks/core';
+import { isBlocksError, Scope } from '@aws-blocks/core';
+import { runWithIdentity } from '@aws-blocks/core/bb-utils';
 import { KnowledgeBase, KnowledgeBaseErrors } from './index.mock.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -54,6 +55,57 @@ function cleanupDirs(...names: string[]): void {
 beforeEach(() => {
 	cleanup();
 	setupTestFixtures();
+});
+
+after(cleanup);
+
+describe('identity access', () => {
+	const pool = 'test/knowledge-identities';
+	const alice = 'mock:alice';
+
+	function boundScope(id: string): Scope {
+		return new Scope(id, { compute: { identityProviderFullId: pool } });
+	}
+
+	test('keeps legacy knowledge bases system-scoped but denies a bound guest unless retrieve is explicitly granted', async () => {
+		const legacy = new KnowledgeBase(new Scope('legacy-kb'), 'docs', { source: 'test-knowledge-tmp' });
+		assert.ok((await legacy.retrieve('password reset')).length > 0);
+
+		const denied = new KnowledgeBase(boundScope('guest-denied'), 'docs', { source: 'test-knowledge-tmp' });
+		await assert.rejects(
+			() => runWithIdentity(pool, { identityId: 'mock:guest', mode: 'mock', authenticated: false }, () => denied.retrieve('password reset')),
+			{ name: 'IdentityPool.Forbidden' },
+		);
+
+		const granted = new KnowledgeBase(boundScope('guest-granted'), 'docs', {
+			source: 'test-knowledge-tmp',
+			identityAccess: [{ access: 'guest', operations: ['retrieve'] }],
+		});
+		const results = await runWithIdentity(
+			pool,
+			{ identityId: 'mock:guest', mode: 'mock', authenticated: false },
+			() => granted.retrieve('password reset'),
+		);
+		assert.ok(results.length > 0);
+	});
+
+	test('uses ordinary source access when no identity has been assumed', async () => {
+		const kb = new KnowledgeBase(boundScope('missing-identity'), 'docs', {
+			source: 'test-knowledge-tmp',
+			identityAccess: [{ access: 'authenticated', operations: ['retrieve'] }],
+		});
+		assert.ok((await kb.retrieve('password reset')).length > 0);
+	});
+
+	test('rejects keyPatterns because Bedrock document and vector keys are not caller-controlled filters', () => {
+		assert.throws(
+			() => new KnowledgeBase(boundScope('invalid-key-pattern'), 'docs', {
+				source: 'test-knowledge-tmp',
+				identityAccess: [{ access: 'guest', operations: ['retrieve'], keyPatterns: ['documents/*'] }],
+			}),
+			/keyPatterns/i,
+		);
+	});
 });
 
 // ── Basic retrieve ─────────────────────────────────────────────────────────

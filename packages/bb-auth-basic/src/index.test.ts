@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import type { BlocksContext } from '@aws-blocks/core';
 import { Scope, hasAuthError } from '@aws-blocks/core';
 import type { AuthStateApi } from '@aws-blocks/auth-common';
+import { KVStore } from '@aws-blocks/bb-kv-store';
 import { AuthBasic, AuthBasicErrors, type AuthBasicOptions } from './index.js';
 import { BB_NAME, BB_VERSION } from './version.js';
 
@@ -119,5 +120,27 @@ describe('AuthBasic telemetry registration', () => {
 			[{ name: BB_NAME, version: BB_VERSION }],
 		);
 		assert.strictEqual(customBlocksCount, 0, 'must not be filtered out as an unnamed custom block');
+	});
+});
+
+describe('AuthBasic identity-bound storage', () => {
+	test('keeps its user and verification records system-scoped without making sibling application stores system-scoped', async () => {
+		const pool = `basic-identity-pool-${++counter}`;
+		const app = new Scope(`basic-identity-${counter}-${Math.random().toString(36).slice(2, 8)}`, {
+			compute: { identityProviderFullId: pool },
+		});
+		const auth = new AuthBasic(app, 'auth');
+		const notes = new KVStore<string>(app, 'notes');
+		const applicationChild = new KVStore<string>(auth, 'application-child');
+		const username = `alice-${Math.random().toString(36).slice(2, 8)}`;
+
+		await auth.signUp(username, 'password123');
+
+		await assert.rejects(() => notes.put(`${username}/note`, 'private'), {
+			name: 'IdentityPool.Unauthorized',
+		});
+		await assert.rejects(() => applicationChild.put(`${username}/note`, 'private'), {
+			name: 'IdentityPool.Unauthorized',
+		});
 	});
 });

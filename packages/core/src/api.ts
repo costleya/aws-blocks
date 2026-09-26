@@ -1,6 +1,12 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+/** Credential-free identity data available during an identity-scoped request. */
+export interface BlocksRequestIdentity {
+  readonly identityId: string;
+  readonly authenticated: boolean;
+}
+
 export type BlocksContext = {
   request: {
     headers: Headers;
@@ -43,6 +49,11 @@ export type BlocksContext = {
     status: number;
     send: (body: any) => void;
   };
+  /**
+   * The identity selected for this request, when its compute has an Identity
+   * Pool provider. This never contains temporary AWS credentials.
+   */
+  identity?: BlocksRequestIdentity;
 };
 
 export type ApiHandler<T extends Record<string, (...args: any[]) => any>> = (context: BlocksContext) => T;
@@ -56,6 +67,7 @@ type AsyncAPI<T extends Record<string, (...args: any[]) => any>> = {
 
 /** Marker symbol to identify ApiNamespace instances during discovery. */
 export const API_NAMESPACE_MARKER = Symbol.for('blocks:ApiNamespace');
+const API_IDENTITY_PROVIDER_MARKER = Symbol.for('blocks:ApiNamespaceIdentityProvider');
 
 import type { ScopeParent } from './common/index.js';
 
@@ -65,6 +77,15 @@ import type { ScopeParent } from './common/index.js';
  * `compute` getter); in the mock/runtime bundles the property is absent.
  */
 type ComputeResolvingScope = { compute?: { namespaces?: string[] } };
+
+type IdentityResolvingScope = { compute?: { identityProviderFullId?: string } };
+
+/** Return the identity provider selected for an API namespace's compute. @internal */
+export function getApiIdentityProvider(handler: unknown): string | undefined {
+	return typeof handler === 'function'
+		? (handler as { [API_IDENTITY_PROVIDER_MARKER]?: string })[API_IDENTITY_PROVIDER_MARKER]
+		: undefined;
+}
 
 /**
  * Record this namespace on its resolved compute so request routing can later
@@ -193,10 +214,14 @@ export interface ApiNamespaceConstructor {
 export const ApiNamespace: ApiNamespaceConstructor = class ApiNamespace {
   constructor(scope: ScopeParent, name: string, handler: any) {
     handler[API_NAMESPACE_MARKER] = name;
+		const identityProviderFullId =
+			scope && typeof scope === 'object'
+				? (scope as IdentityResolvingScope).compute?.identityProviderFullId
+				: undefined;
+		if (identityProviderFullId) handler[API_IDENTITY_PROVIDER_MARKER] = identityProviderFullId;
     // Record the namespace → compute association for per-compute routing.
     // No-op outside CDK synth. Signature and returned handler are unchanged.
     recordNamespaceOnCompute(scope, name);
     return handler;
   }
 } as any;
-

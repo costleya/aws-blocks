@@ -5,6 +5,7 @@
 ```ts
 
 import type { ChildLogger } from '@aws-blocks/bb-logger';
+import type { IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 import { Scope } from '@aws-blocks/core';
 import type { ScopeParent } from '@aws-blocks/core';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
@@ -53,9 +54,13 @@ export const KVStoreErrors: {
     readonly ItemTooLarge: "ItemTooLargeException";
 };
 
+// @public
+export type KVStoreOperation = 'get' | 'put' | 'delete' | 'scan';
+
 // @public (undocumented)
 export interface KVStoreOptions<T = string> {
     deletionProtection?: boolean;
+    identityAccess?: readonly IdentityResourceGrant<KVStoreOperation>[];
     logger?: ChildLogger;
     removalPolicy?: 'destroy' | 'retain';
     schema?: StandardSchemaV1<T>;

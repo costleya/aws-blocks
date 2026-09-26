@@ -18,6 +18,7 @@
 
 import { Scope, registerSdkIdentifiers, getSdkIdentifiers } from '@aws-blocks/core';
 import type { ScopeParent } from '@aws-blocks/core';
+import { withSystemIdentityScope } from '@aws-blocks/core/bb-utils';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { EventEmitter } from 'events';
 import {
@@ -372,12 +373,14 @@ export const Realtime: {
 
 		// Initialize the DistributedTable for connection tracking (shared across instances)
 		if (!_connectionsTable) {
-			_connectionsTable = new DistributedTable(this, 'connections', {
-				schema: connectionsSchema,
-				key: { partitionKey: 'connectionId', sortKey: 'channel' } as const,
-				indexes: { 'channel-index': { partitionKey: 'channel', sortKey: 'connectionId' } } as const,
-				ttl: 'expiresAt',
-			});
+			_connectionsTable = withSystemIdentityScope(this, () =>
+				new DistributedTable(this, 'connections', {
+					schema: connectionsSchema,
+					key: { partitionKey: 'connectionId', sortKey: 'channel' } as const,
+					indexes: { 'channel-index': { partitionKey: 'channel', sortKey: 'connectionId' } } as const,
+					ttl: 'expiresAt',
+				}),
+			);
 		}
 
 		// Initialize the token secret via AppSetting (shared across instances)

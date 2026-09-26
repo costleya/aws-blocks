@@ -94,6 +94,12 @@ The method stubs are consistent with construction: `retrieve()`, `isSynced()`, a
 
 **Rationale:** The stack-level aspect flips every resource's `DeletionPolicy` to `Delete`, **but it cannot enable `autoDeleteObjects`** on a bucket — `autoDeleteObjects` is a constructor behavior (it provisions a custom resource + Lambda that empties the bucket on delete), not a CloudFormation attribute an aspect can toggle after the fact. Consequence: if you rely solely on the stack-level aspect and do **not** pass `removalPolicy: 'destroy'` to the KnowledgeBase, the data bucket's `DeletionPolicy` becomes `Delete` but it still has objects in it, so CloudFormation's `DELETE` fails with `BucketNotEmpty` and the teardown stalls. Passing `removalPolicy: 'destroy'` (or running in sandbox mode) pairs `RemovalPolicy.DESTROY` with `autoDeleteObjects` on the data bucket and `DeletionPolicy: Delete` on the S3 Vectors resources (see D-KB-10), so the bucket is emptied and every resource is removed without manual intervention.
 
+### D-KB-12: Compute identity grants are knowledge-base scoped
+
+**Decision:** On a compute bound to an Identity Pool, CDK grants only the explicitly declared `retrieve`, `isSynced`, and `waitUntilSynced` actions on the knowledge base ARN to the authenticated or guest pool role. After an API method calls `assumeForIdentity(context)`, the mock checks the declared operation and AWS creates a fresh Bedrock SDK client from the request's fixed temporary-credential snapshot; IAM enforces the AWS operation. Without an assumption, the ordinary handler client is used. An unbound compute retains its existing execution-role grant.
+
+**Rationale:** Bedrock retrieval operates on a knowledge base, not a caller-visible source document key. The data S3 bucket and S3 Vectors index are accessed during ingestion by the Bedrock service role, so granting a caller `bedrock:Retrieve` cannot safely express an S3 prefix boundary. `keyPatterns` are therefore rejected for KnowledgeBase instead of suggesting a document-level restriction that IAM cannot enforce. Content segmentation belongs in separate knowledge bases or application-level metadata filtering. The service role's S3, vector-store, embedding-model, and ingestion permissions remain system access and never flow to compute identities. AWS documents the caller and service-role boundaries in its [Knowledge Base API permissions](https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base-prereq-permissions-general.html) and [service-role permissions](https://docs.aws.amazon.com/bedrock/latest/userguide/kb-permissions.html).
+
 ## Infrastructure (CDK)
 
 Creates the following resources:
@@ -113,7 +119,7 @@ Creates the following resources:
 7. **AwsCustomResource (StartIngestionJob)** — Fires `bedrock:StartIngestionJob` on Create/Update. Ingestion runs asynchronously. Depends on both the data source and bucket deployment (when present) so documents are in S3 before ingestion starts.
 
 **Handler config** (registered via `registerConfig`, surfaced to the runtime as env vars): `BLOCKS_{FULLID}_KB_ID`, `BLOCKS_{FULLID}_DATA_SOURCE_ID` (the data source id drives the `isSynced()` / `waitUntilSynced()` sync checks)
-**IAM grants to handler:** `bedrock:Retrieve`, `bedrock:GetIngestionJob`, `bedrock:ListIngestionJobs` on the knowledge base ARN (the ingestion-job actions back the sync checks; the data source and its ingestion jobs are sub-resources of the KB ARN)
+**IAM grants to handler:** On an unbound compute, its execution role receives `bedrock:Retrieve`, `bedrock:GetIngestionJob`, and `bedrock:ListIngestionJobs` on the knowledge base ARN. On an identity-bound compute, the authenticated or guest Identity Pool role named by each `identityAccess` grant receives the actions for that grant. The runtime uses that role's credentials after an explicit `assumeForIdentity(context)`; without an assumption, it uses the ordinary handler client. The ingestion-job actions back the sync checks; the data source and its ingestion jobs are sub-resources of the KB ARN.
 
 ## Mock Implementation
 
@@ -134,6 +140,6 @@ Creates the following resources:
 | No PDF/DOCX support in mock | Documents in binary formats are skipped locally | Document the gap; these formats work on AWS where Bedrock handles parsing |
 | Paragraph chunking vs Bedrock strategies | Chunk boundaries differ between mock and production | No mitigation — chunking configuration only affects the CDK/Bedrock path. Mock uses simple paragraph splitting for all strategies |
 | No ingestion pipeline | Documents are indexed synchronously on first `retrieve()` | No mitigation — the mock doesn't need async ingestion. First call may be slower due to indexing |
-| No IAM enforcement | Permission errors only surface in AWS | No mitigation — IAM is handled by CDK grants automatically |
+| Bedrock IAM policy evaluation | The mock enforces declared KnowledgeBase operations but does not evaluate AWS policies | Validate the synthesized Identity Pool role policies and sandbox behavior when changing permission boundaries |
 | Immediate consistency | New documents appear instantly vs async ingestion in AWS | No mitigation — eventual consistency in AWS is inherent to the Bedrock ingestion pipeline |
 | Unconditional mock sync | `isSynced()` always returns `true` (and `waitUntilSynced()` resolves immediately) — even for an `s3://` source that `retrieve()` rejects with `InvalidSourceConfigException`. Local sync state is therefore NOT a proxy for a working local `retrieve()` on `s3://` sources — the inverse of the production contract, where `isSynced() === true` implies `retrieve()` is queryable | No mitigation — local has no async ingestion to wait on, so sync is a no-op. `s3://` sources require AWS infrastructure; validate them in sandbox/production where sync state genuinely reflects queryability |

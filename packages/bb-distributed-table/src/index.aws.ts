@@ -1,56 +1,65 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ScopeParent } from '@aws-blocks/core';
+import { getSdkIdentifiers, registerSdkIdentifiers, Scope } from '@aws-blocks/core';
+import { captureRequestIdentity, withRequestAwsClient } from '@aws-blocks/core/bb-utils';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
+	BatchGetCommand,
+	BatchWriteCommand,
+	DeleteCommand,
 	DynamoDBDocumentClient,
 	GetCommand,
 	PutCommand,
-	DeleteCommand,
 	QueryCommand,
 	ScanCommand,
-	BatchGetCommand,
-	BatchWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { Scope, registerSdkIdentifiers, getSdkIdentifiers } from '@aws-blocks/core';
-import type { ScopeParent } from '@aws-blocks/core';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { BB_NAME, BB_VERSION } from './version.js';
 
 export { DistributedTableErrors } from './errors.js';
 export type {
-	TableKeyConfig,
-	DistributedTableOptions,
-	ReadValidationMode,
-	ExternalTableRef,
-	ExternalKmsKeyRef,
-	TableKey,
-	PartitionKeyCondition,
-	SortKeyCondition,
-	KeyCondition,
-	QueryOptions,
-	ScanOptions,
-	PutOptions,
 	DeleteOptions,
+	DistributedTableOperation,
+	DistributedTableOptions,
+	ExternalKmsKeyRef,
+	ExternalTableRef,
+	KeyCondition,
+	PartitionKeyCondition,
+	PutOptions,
+	QueryOptions,
+	ReadValidationMode,
+	ScanOptions,
+	SortKeyCondition,
+	TableKey,
+	TableKeyConfig,
 } from './types.js';
 
+import type { ChildLogger } from '@aws-blocks/bb-logger';
+import { Logger } from '@aws-blocks/bb-logger';
+import {
+	applyReadValidation,
+	blocksError,
+	conditionalCheckFailed,
+	DistributedTableErrors,
+	DistributedTableMessages,
+	normalizeSortKeyCondition,
+	remapItemTooLarge,
+} from './errors.js';
 import type {
-	TableKeyConfig,
-	DistributedTableOptions,
-	ExternalTableRef,
-	ExternalKmsKeyRef,
-	ScanOptions,
-	PutOptions,
 	DeleteOptions,
-	PartitionKeyCondition,
+	DistributedTableOptions,
+	ExternalKmsKeyRef,
+	ExternalTableRef,
+	PutOptions,
+	QueryOptions,
+	ReadValidationMode,
+	ScanOptions,
 	SortKeyCondition,
 	TableKey,
-	ReadValidationMode,
+	TableKeyConfig,
 } from './types.js';
-import { DistributedTableErrors, DistributedTableMessages, blocksError, conditionalCheckFailed, normalizeSortKeyCondition, remapItemTooLarge, applyReadValidation } from './errors.js';
-import type { KeyCondition, QueryOptions } from './types.js';
-import { Logger } from '@aws-blocks/bb-logger';
-import type { ChildLogger } from '@aws-blocks/bb-logger';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -89,7 +98,11 @@ export class DistributedTable<
 	/** @internal Logger for internal operations. Defaults to warn-level when not provided. */
 	protected log: ChildLogger;
 
-	constructor(scope: ScopeParent, id: string, public options: DistributedTableOptions<T, K, Indexes>) {
+	constructor(
+		scope: ScopeParent,
+		id: string,
+		public options: DistributedTableOptions<T, K, Indexes>,
+	) {
 		super(id, { parent: scope, bbName: BB_NAME, bbVersion: BB_VERSION });
 		// Default level is 'warn' (not 'error') so the readValidation='coerce'
 		// raw-fallback warning actually surfaces — it's the only log the block
@@ -108,71 +121,79 @@ export class DistributedTable<
 	}
 
 	async get(key: TableKey<T, K>): Promise<T | null> {
-		const result = await this.docClient.send(new GetCommand({
-			TableName: getSdkIdentifiers(this).tableName,
-			Key: this.buildKey(key),
-		}));
-		return this.reconcileRead((result.Item as T) ?? null);
+		return this.withDocumentClient(async (docClient) => {
+			const result = await docClient.send(
+				new GetCommand({
+					TableName: getSdkIdentifiers(this).tableName,
+					Key: this.buildKey(key),
+				}),
+			);
+			return this.reconcileRead((result.Item as T) ?? null);
+		});
 	}
 
 	async put(item: T, options?: PutOptions<T>): Promise<void> {
-		await this.validateItem(item);
-		const command: any = { TableName: getSdkIdentifiers(this).tableName, Item: item };
+		await this.withDocumentClient(async (docClient) => {
+			try {
+				await this.validateItem(item);
+				const command: any = { TableName: getSdkIdentifiers(this).tableName, Item: item };
 
-		if (options?.ifNotExists) {
-			command.ConditionExpression = 'attribute_not_exists(#pk)';
-			command.ExpressionAttributeNames = { '#pk': this.keyConfig.partitionKey };
-		} else if (options?.ifFieldEquals) {
-			this.applyFieldEqualsCondition(command, options.ifFieldEquals);
-		}
+				if (options?.ifNotExists) {
+					command.ConditionExpression = 'attribute_not_exists(#pk)';
+					command.ExpressionAttributeNames = { '#pk': this.keyConfig.partitionKey };
+				} else if (options?.ifFieldEquals) {
+					this.applyFieldEqualsCondition(command, options.ifFieldEquals);
+				}
 
-		try {
-			await this.docClient.send(new PutCommand(command));
-		} catch (err: unknown) {
-			// A failed conditional write is a Conflict, not an
-			// InternalServerError: map DynamoDB's raw
-			// ConditionalCheckFailedException to an ApiError with status 409 so the
-			// JSON-RPC serializer emits code 409 instead of 500. Name is preserved
-			// for isBlocksError(), the driver error is kept as `cause`. DynamoDB
-			// collapses every conditional failure under one exception with no
-			// sub-reason, so retriability is derived from the conditions THIS call
-			// set, matching the mock: existence assertion wins — retriable only for
-			// a pure `ifFieldEquals` optimistic-lock check (value presence, so an
-			// explicit `undefined` is treated as absent) and NOT when `ifNotExists`
-			// is also set. Other errors (e.g. oversized items) still flow through
-			// remapItemTooLarge.
-			if (err instanceof Error && err.name === DistributedTableErrors.ConditionalCheckFailed) {
-				throw conditionalCheckFailed(options?.ifFieldEquals !== undefined && !options?.ifNotExists, err);
+				await docClient.send(new PutCommand(command));
+			} catch (err: unknown) {
+				// A failed conditional write is a Conflict, not an
+				// InternalServerError: map DynamoDB's raw
+				// ConditionalCheckFailedException to an ApiError with status 409 so the
+				// JSON-RPC serializer emits code 409 instead of 500. Name is preserved
+				// for isBlocksError(), the driver error is kept as `cause`. DynamoDB
+				// collapses every conditional failure under one exception with no
+				// sub-reason, so retriability is derived from the conditions THIS call
+				// set, matching the mock: existence assertion wins — retriable only for
+				// a pure `ifFieldEquals` optimistic-lock check (value presence, so an
+				// explicit `undefined` is treated as absent) and NOT when `ifNotExists`
+				// is also set. Other errors (e.g. oversized items) still flow through
+				// remapItemTooLarge.
+				if (err instanceof Error && err.name === DistributedTableErrors.ConditionalCheckFailed) {
+					throw conditionalCheckFailed(options?.ifFieldEquals !== undefined && !options?.ifNotExists, err);
+				}
+				throw remapItemTooLarge(err);
 			}
-			throw remapItemTooLarge(err);
-		}
+		});
 	}
 
 	async delete(key: TableKey<T, K>, options?: DeleteOptions<T>): Promise<void> {
-		const command: any = { TableName: getSdkIdentifiers(this).tableName, Key: this.buildKey(key) };
+		await this.withDocumentClient(async (docClient) => {
+			try {
+				const command: any = { TableName: getSdkIdentifiers(this).tableName, Key: this.buildKey(key) };
 
-		if (options?.ifExists) {
-			command.ConditionExpression = 'attribute_exists(#pk)';
-			command.ExpressionAttributeNames = { '#pk': this.keyConfig.partitionKey };
-		} else if (options?.ifFieldEquals) {
-			this.applyFieldEqualsCondition(command, options.ifFieldEquals);
-		}
+				if (options?.ifExists) {
+					command.ConditionExpression = 'attribute_exists(#pk)';
+					command.ExpressionAttributeNames = { '#pk': this.keyConfig.partitionKey };
+				} else if (options?.ifFieldEquals) {
+					this.applyFieldEqualsCondition(command, options.ifFieldEquals);
+				}
 
-		try {
-			await this.docClient.send(new DeleteCommand(command));
-		} catch (err: unknown) {
-			// A failed conditional delete is a Conflict, not an
-			// InternalServerError: map DynamoDB's raw
-			// ConditionalCheckFailedException to an ApiError with status 409 (see
-			// the put path above). Retriability is derived from the conditions THIS
-			// call set, matching the mock: existence assertion wins — retriable only
-			// for a pure `ifFieldEquals` optimistic-lock check (value presence) and
-			// NOT when `ifExists` is also set.
-			if (err instanceof Error && err.name === DistributedTableErrors.ConditionalCheckFailed) {
-				throw conditionalCheckFailed(options?.ifFieldEquals !== undefined && !options?.ifExists, err);
+				await docClient.send(new DeleteCommand(command));
+			} catch (err: unknown) {
+				// A failed conditional delete is a Conflict, not an
+				// InternalServerError: map DynamoDB's raw
+				// ConditionalCheckFailedException to an ApiError with status 409 (see
+				// the put path above). Retriability is derived from the conditions THIS
+				// call set, matching the mock: existence assertion wins — retriable only
+				// for a pure `ifFieldEquals` optimistic-lock check (value presence) and
+				// NOT when `ifExists` is also set.
+				if (err instanceof Error && err.name === DistributedTableErrors.ConditionalCheckFailed) {
+					throw conditionalCheckFailed(options?.ifFieldEquals !== undefined && !options?.ifExists, err);
+				}
+				throw err;
 			}
-			throw err;
-		}
+		});
 	}
 
 	/**
@@ -184,11 +205,20 @@ export class DistributedTable<
 	 *   `{ equals: value }`, or more than one sort-key condition is supplied
 	 *   (DynamoDB allows only one per query — use `between` for ranges).
 	 */
-	async *query(
+	query(options: QueryOptions<T, K, Indexes>): AsyncIterable<T> {
+		return this.queryPages(options, captureRequestIdentity(this));
+	}
+
+	private async *queryPages(
 		options: QueryOptions<T, K, Indexes>,
+		assertRequestIdentity: () => void,
 	): AsyncIterable<T> {
 		const indexConfig = options.index ? this.indexes[options.index as keyof Indexes] : this.keyConfig;
-		if (!indexConfig) throw blocksError(DistributedTableErrors.InvalidQuery, DistributedTableMessages.indexNotFound(options.index));
+		if (!indexConfig)
+			throw blocksError(
+				DistributedTableErrors.InvalidQuery,
+				DistributedTableMessages.indexNotFound(options.index),
+			);
 
 		const pkField = indexConfig.partitionKey;
 		const skField = indexConfig.sortKey;
@@ -198,7 +228,10 @@ export class DistributedTable<
 		}
 		const pkValue = (options.where as any)[pkField]?.equals;
 		if (pkValue === undefined) {
-			throw blocksError(DistributedTableErrors.InvalidQuery, DistributedTableMessages.partitionKeyEqualsRequired(pkField));
+			throw blocksError(
+				DistributedTableErrors.InvalidQuery,
+				DistributedTableMessages.partitionKeyEqualsRequired(pkField),
+			);
 		}
 		// Normalize the sort-key condition before building the query: a present-but-
 		// empty condition ({} / all-undefined) becomes "no filter" (otherwise we'd
@@ -212,11 +245,22 @@ export class DistributedTable<
 		let count = 0;
 
 		do {
-			const command = this.buildQueryCommand(options.index, pkField, pkValue, skField, skCondition, lastEvaluatedKey, options);
-			const result = await this.docClient.send(command);
+			assertRequestIdentity();
+			const command = this.buildQueryCommand(
+				options.index,
+				pkField,
+				pkValue,
+				skField,
+				skCondition,
+				lastEvaluatedKey,
+				options,
+			);
+			const result = await this.withDocumentClient((docClient) => docClient.send(command));
 
 			for (const item of result.Items ?? []) {
-				yield (await this.reconcileRead(item as T)) as T;
+				const value = (await this.reconcileRead(item as T)) as T;
+				assertRequestIdentity();
+				yield value;
 				if (options.limit && ++count >= options.limit) return;
 			}
 
@@ -224,19 +268,30 @@ export class DistributedTable<
 		} while (lastEvaluatedKey);
 	}
 
-	async *scan(options?: ScanOptions): AsyncIterable<T> {
+	scan(options?: ScanOptions): AsyncIterable<T> {
+		return this.scanPages(options, captureRequestIdentity(this));
+	}
+
+	private async *scanPages(options: ScanOptions | undefined, assertRequestIdentity: () => void): AsyncIterable<T> {
 		let lastEvaluatedKey: Record<string, any> | undefined;
 		let count = 0;
 
 		do {
-			const result = await this.docClient.send(new ScanCommand({
-				TableName: getSdkIdentifiers(this).tableName,
-				ExclusiveStartKey: lastEvaluatedKey,
-				Limit: options?.limit,
-			}));
+			assertRequestIdentity();
+			const result = await this.withDocumentClient((docClient) =>
+				docClient.send(
+					new ScanCommand({
+						TableName: getSdkIdentifiers(this).tableName,
+						ExclusiveStartKey: lastEvaluatedKey,
+						Limit: options?.limit,
+					}),
+				),
+			);
 
 			for (const item of result.Items ?? []) {
-				yield (await this.reconcileRead(item as T)) as T;
+				const value = (await this.reconcileRead(item as T)) as T;
+				assertRequestIdentity();
+				yield value;
 				if (options?.limit && ++count >= options.limit) return;
 			}
 
@@ -248,63 +303,76 @@ export class DistributedTable<
 		const results = new Map<string, T>();
 		const tableName = getSdkIdentifiers(this).tableName;
 
-		for (const chunk of chunked(keys, BATCH_GET_MAX_KEYS)) {
-			await this.retryUnprocessed(
-				'getBatch',
-				chunk.map(k => this.buildKey(k)),
-				async pendingKeys => {
-					const resp = await this.docClient.send(new BatchGetCommand({
-						RequestItems: { [tableName]: { Keys: pendingKeys } },
-					}));
-					for (const item of resp.Responses?.[tableName] ?? []) {
-						results.set(JSON.stringify(this.buildKey(item as any)), item as T);
-					}
-					return resp.UnprocessedKeys?.[tableName]?.Keys as Record<string, any>[] | undefined;
-				},
+		return this.withDocumentClient(async (docClient) => {
+			for (const chunk of chunked(keys, BATCH_GET_MAX_KEYS)) {
+				await this.retryUnprocessed(
+					'getBatch',
+					chunk.map((k) => this.buildKey(k)),
+					async (pendingKeys) => {
+						const resp = await docClient.send(
+							new BatchGetCommand({
+								RequestItems: { [tableName]: { Keys: pendingKeys } },
+							}),
+						);
+						for (const item of resp.Responses?.[tableName] ?? []) {
+							results.set(JSON.stringify(this.buildKey(item as any)), item as T);
+						}
+						return resp.UnprocessedKeys?.[tableName]?.Keys as Record<string, any>[] | undefined;
+					},
+				);
+			}
+			return Promise.all(
+				keys.map((key) => this.reconcileRead(results.get(JSON.stringify(this.buildKey(key))) ?? null)),
 			);
-		}
-		return Promise.all(
-			keys.map(key => this.reconcileRead(results.get(JSON.stringify(this.buildKey(key))) ?? null)),
-		);
+		});
 	}
 
 	async putBatch(items: T[]): Promise<void> {
-		for (const item of items) await this.validateItem(item);
 		const tableName = getSdkIdentifiers(this).tableName;
 
-		for (const chunk of chunked(items, BATCH_WRITE_MAX_REQUESTS)) {
-			await this.retryUnprocessed(
-				'putBatch',
-				chunk.map(item => ({ PutRequest: { Item: item as any } })),
-				async requests => {
-					try {
-						const resp = await this.docClient.send(new BatchWriteCommand({
-							RequestItems: { [tableName]: requests },
-						}));
-						return resp.UnprocessedItems?.[tableName] as any[] | undefined;
-					} catch (err: unknown) {
-						throw remapItemTooLarge(err);
-					}
-				},
-			);
-		}
+		await this.withDocumentClient(async (docClient) => {
+			for (const item of items) await this.validateItem(item);
+
+			for (const chunk of chunked(items, BATCH_WRITE_MAX_REQUESTS)) {
+				await this.retryUnprocessed(
+					'putBatch',
+					chunk.map((item) => ({ PutRequest: { Item: item as any } })),
+					async (requests) => {
+						try {
+							const resp = await docClient.send(
+								new BatchWriteCommand({
+									RequestItems: { [tableName]: requests },
+								}),
+							);
+							return resp.UnprocessedItems?.[tableName] as any[] | undefined;
+						} catch (err: unknown) {
+							throw remapItemTooLarge(err);
+						}
+					},
+				);
+			}
+		});
 	}
 
 	async deleteBatch(keys: TableKey<T, K>[]): Promise<void> {
 		const tableName = getSdkIdentifiers(this).tableName;
 
-		for (const chunk of chunked(keys, BATCH_WRITE_MAX_REQUESTS)) {
-			await this.retryUnprocessed(
-				'deleteBatch',
-				chunk.map(key => ({ DeleteRequest: { Key: this.buildKey(key) } })),
-				async requests => {
-					const resp = await this.docClient.send(new BatchWriteCommand({
-						RequestItems: { [tableName]: requests },
-					}));
-					return resp.UnprocessedItems?.[tableName] as any[] | undefined;
-				},
-			);
-		}
+		await this.withDocumentClient(async (docClient) => {
+			for (const chunk of chunked(keys, BATCH_WRITE_MAX_REQUESTS)) {
+				await this.retryUnprocessed(
+					'deleteBatch',
+					chunk.map((key) => ({ DeleteRequest: { Key: this.buildKey(key) } })),
+					async (requests) => {
+						const resp = await docClient.send(
+							new BatchWriteCommand({
+								RequestItems: { [tableName]: requests },
+							}),
+						);
+						return resp.UnprocessedItems?.[tableName] as any[] | undefined;
+					},
+				);
+			}
+		});
 	}
 
 	static fromExisting(tableName: string): ExternalTableRef {
@@ -336,9 +404,26 @@ export class DistributedTable<
 	}
 
 	private buildKey(key: TableKey<T, K>): Record<string, any> {
-		const result: Record<string, any> = { [this.keyConfig.partitionKey]: (key as any)[this.keyConfig.partitionKey] };
+		const result: Record<string, any> = {
+			[this.keyConfig.partitionKey]: (key as any)[this.keyConfig.partitionKey],
+		};
 		if (this.keyConfig.sortKey) result[this.keyConfig.sortKey] = (key as any)[this.keyConfig.sortKey];
 		return result;
+	}
+
+	private async withDocumentClient<R>(callback: (docClient: DynamoDBDocumentClient) => Promise<R>): Promise<R> {
+		return withRequestAwsClient(
+			this,
+			this.docClient,
+			(credentials) =>
+				DynamoDBDocumentClient.from(
+					new DynamoDBClient({
+						customUserAgent: this.buildUserAgentChain(),
+						credentials,
+					}),
+				),
+			callback,
+		);
 	}
 
 	private backoff(attempt: number): Promise<void> {
@@ -349,7 +434,7 @@ export class DistributedTable<
 		// See: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Programming.Errors.html#Programming.Errors.BatchOperations
 		const capped = Math.min(BASE_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
 		const ms = capped / 2 + Math.random() * (capped / 2);
-		return new Promise(resolve => setTimeout(resolve, ms));
+		return new Promise((resolve) => setTimeout(resolve, ms));
 	}
 
 	/**
@@ -420,20 +505,27 @@ export class DistributedTable<
 		if (skField && skCondition) {
 			names['#sk'] = skField;
 			if ('equals' in skCondition && skCondition.equals !== undefined) {
-				expr += ' AND #sk = :skval'; values[':skval'] = skCondition.equals;
+				expr += ' AND #sk = :skval';
+				values[':skval'] = skCondition.equals;
 			} else if ('greaterThan' in skCondition && skCondition.greaterThan !== undefined) {
-				expr += ' AND #sk > :skval'; values[':skval'] = skCondition.greaterThan;
+				expr += ' AND #sk > :skval';
+				values[':skval'] = skCondition.greaterThan;
 			} else if ('greaterThanOrEqual' in skCondition && skCondition.greaterThanOrEqual !== undefined) {
-				expr += ' AND #sk >= :skval'; values[':skval'] = skCondition.greaterThanOrEqual;
+				expr += ' AND #sk >= :skval';
+				values[':skval'] = skCondition.greaterThanOrEqual;
 			} else if ('lessThan' in skCondition && skCondition.lessThan !== undefined) {
-				expr += ' AND #sk < :skval'; values[':skval'] = skCondition.lessThan;
+				expr += ' AND #sk < :skval';
+				values[':skval'] = skCondition.lessThan;
 			} else if ('lessThanOrEqual' in skCondition && skCondition.lessThanOrEqual !== undefined) {
-				expr += ' AND #sk <= :skval'; values[':skval'] = skCondition.lessThanOrEqual;
+				expr += ' AND #sk <= :skval';
+				values[':skval'] = skCondition.lessThanOrEqual;
 			} else if ('between' in skCondition && skCondition.between) {
 				expr += ' AND #sk BETWEEN :skval1 AND :skval2';
-				values[':skval1'] = skCondition.between[0]; values[':skval2'] = skCondition.between[1];
+				values[':skval1'] = skCondition.between[0];
+				values[':skval2'] = skCondition.between[1];
 			} else if ('beginsWith' in skCondition && skCondition.beginsWith !== undefined) {
-				expr += ' AND begins_with(#sk, :skval)'; values[':skval'] = skCondition.beginsWith;
+				expr += ' AND begins_with(#sk, :skval)';
+				values[':skval'] = skCondition.beginsWith;
 			}
 		}
 
@@ -451,4 +543,3 @@ export class DistributedTable<
 }
 
 // ── Query input helper type ─────────────────────────────────────────────────
-

@@ -81,6 +81,7 @@ import { DistributedDatabaseErrors } from '@aws-blocks/bb-distributed-data';
 import { DistributedDatabaseOptions } from '@aws-blocks/bb-distributed-data';
 import { DistributedTable } from '@aws-blocks/bb-distributed-table';
 import { DistributedTableErrors } from '@aws-blocks/bb-distributed-table';
+import { DistributedTableOperation } from '@aws-blocks/bb-distributed-table';
 import { DistributedTableOptions } from '@aws-blocks/bb-distributed-table';
 import { DeleteOptions as DTDeleteOptions } from '@aws-blocks/bb-distributed-table';
 import { PutOptions as DTPutOptions } from '@aws-blocks/bb-distributed-table';
@@ -100,6 +101,7 @@ import { PutOptions as FBPutOptions } from '@aws-blocks/bb-file-bucket';
 import { ScanOptions as FBScanOptions } from '@aws-blocks/bb-file-bucket';
 import { FileBucket } from '@aws-blocks/bb-file-bucket';
 import { FileBucketErrors } from '@aws-blocks/bb-file-bucket';
+import { FileBucketOperation } from '@aws-blocks/bb-file-bucket';
 import { FileBucketOptions } from '@aws-blocks/bb-file-bucket';
 import { FileContent } from '@aws-blocks/bb-file-bucket';
 import { FileInfo } from '@aws-blocks/bb-file-bucket';
@@ -108,13 +110,24 @@ import { GetUrlOptions } from '@aws-blocks/bb-file-bucket';
 import { github } from '@aws-blocks/bb-auth-oidc';
 import { google } from '@aws-blocks/bb-auth-oidc';
 import { GroupAdmin } from '@aws-blocks/bb-auth-cognito';
+import { IdentityAccess } from '@aws-blocks/core/bb-utils';
+import { IdentityPool } from '@aws-blocks/bb-identity-pool';
+import { IdentityPoolErrors } from '@aws-blocks/bb-identity-pool';
+import { IdentityPoolOptions } from '@aws-blocks/bb-identity-pool';
+import { IdentityPoolReference } from '@aws-blocks/bb-lambda-compute';
+import { IdentityPoolUser } from '@aws-blocks/bb-identity-pool';
+import { IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 import { KnowledgeBase } from '@aws-blocks/bb-knowledge-base';
 import { KnowledgeBaseErrors } from '@aws-blocks/bb-knowledge-base';
+import { KnowledgeBaseOperation } from '@aws-blocks/bb-knowledge-base';
 import { KnowledgeBaseOptions } from '@aws-blocks/bb-knowledge-base';
 import { PutOptions as KVPutOptions } from '@aws-blocks/bb-kv-store';
 import { KVStore } from '@aws-blocks/bb-kv-store';
 import { KVStoreErrors } from '@aws-blocks/bb-kv-store';
+import { KVStoreOperation } from '@aws-blocks/bb-kv-store';
 import { KVStoreOptions } from '@aws-blocks/bb-kv-store';
+import { LambdaCompute } from '@aws-blocks/bb-lambda-compute';
+import { LambdaComputeProps } from '@aws-blocks/bb-lambda-compute';
 import { LifecycleAdmin } from '@aws-blocks/bb-auth-cognito';
 import { LifecycleRule } from '@aws-blocks/bb-file-bucket';
 import { LogEntry } from '@aws-blocks/bb-logger';
@@ -336,6 +349,8 @@ export { DistributedTable }
 
 export { DistributedTableErrors }
 
+export { DistributedTableOperation }
+
 export { DistributedTableOptions }
 
 export { DTDeleteOptions }
@@ -373,6 +388,8 @@ export { FBScanOptions }
 export { FileBucket }
 
 export { FileBucketErrors }
+
+export { FileBucketOperation }
 
 export { FileBucketOptions }
 
@@ -478,9 +495,25 @@ export { google }
 
 export { GroupAdmin }
 
+export { IdentityAccess }
+
+export { IdentityPool }
+
+export { IdentityPoolErrors }
+
+export { IdentityPoolOptions }
+
+export { IdentityPoolReference }
+
+export { IdentityPoolUser }
+
+export { IdentityResourceGrant }
+
 export { KnowledgeBase }
 
 export { KnowledgeBaseErrors }
+
+export { KnowledgeBaseOperation }
 
 export { KnowledgeBaseOptions }
 
@@ -490,7 +523,13 @@ export { KVStore }
 
 export { KVStoreErrors }
 
+export { KVStoreOperation }
+
 export { KVStoreOptions }
+
+export { LambdaCompute }
+
+export { LambdaComputeProps }
 
 export { LifecycleAdmin }
 

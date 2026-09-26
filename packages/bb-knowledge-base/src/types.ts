@@ -6,6 +6,7 @@
  * This file has zero runtime dependencies — types only.
  */
 import type { ChildLogger } from '@aws-blocks/bb-logger';
+import type { IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 
 // ── Source Configuration ────────────────────────────────────────────────────
 
@@ -81,6 +82,13 @@ export interface ChunkingConfig {
 export interface KnowledgeBaseOptions {
 	/** Document source — local folder path (`'./knowledge'`) or S3 URI (`'s3://bucket/prefix'`). */
 	source: SourceConfig;
+	/**
+	 * Identity operations this knowledge base permits when its compute has an
+	 * identity provider. Grants are scoped to the knowledge base as a whole;
+	 * document source keys and vector-store entries are managed by Bedrock and
+	 * cannot be constrained by caller-visible key patterns. Omit `keyPatterns`.
+	 */
+	identityAccess?: readonly IdentityResourceGrant<KnowledgeBaseOperation>[];
 	/** How documents are split into chunks. Default: `{ strategy: 'semantic' }`. */
 	chunking?: ChunkingConfig;
 	/** Embedding model output dimensions. Smaller values reduce cost and storage; larger values improve accuracy. Default: 1024. */
@@ -101,6 +109,9 @@ export interface KnowledgeBaseOptions {
 	/** Optional logger for internal operations. When omitted, a default Logger at error level is created. */
 	logger?: ChildLogger;
 }
+
+/** Operations that an identity resource grant can authorize for a KnowledgeBase. */
+export type KnowledgeBaseOperation = 'retrieve' | 'isSynced' | 'waitUntilSynced';
 
 // ── Retrieve Options & Results ─────────────────────────────────────────────
 

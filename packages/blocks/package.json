@@ -72,7 +72,7 @@
     "prebuild": "node ../../scripts/gen-block-docs.mjs",
     "prepack": "node ../../scripts/gen-block-docs.mjs",
     "build": "tsc --build",
-    "test": "node --test dist/conditional-exports.test.js dist/vendorize-map.test.js && node --conditions=cdk --test dist/umbrella-compute.test.js"
+    "test": "node --test dist/conditional-exports.test.js dist/vendorize-map.test.js && node --conditions=cdk --test --test-concurrency=1 dist/umbrella-compute.test.js dist/identity.cdk.test.js"
   },
   "dependencies": {
     "@aws-blocks/core": "^0.5.0",
@@ -80,6 +80,7 @@
     "@aws-blocks/auth-common": "^0.1.8",
     "@aws-blocks/bb-auth-basic": "^0.1.9",
     "@aws-blocks/bb-auth-cognito": "^0.1.10",
+    "@aws-blocks/bb-identity-pool": "^0.1.0",
     "@aws-blocks/bb-auth-oidc": "^0.2.0",
     "@aws-blocks/bb-kv-store": "^0.2.0",
     "@aws-blocks/bb-distributed-table": "^0.2.0",
@@ -136,6 +137,12 @@
       ],
       "@aws-blocks/bb-auth-cognito": [
         "AuthCognito"
+      ],
+      "@aws-blocks/bb-identity-pool": [
+        "IdentityPool"
+      ],
+      "@aws-blocks/bb-lambda-compute": [
+        "LambdaCompute"
       ],
       "@aws-blocks/bb-auth-oidc": [
         "AuthOIDC"

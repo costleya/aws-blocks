@@ -5,8 +5,13 @@ import { Duration } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { Queue, QueueEncryption } from 'aws-cdk-lib/aws-sqs';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
-import { BuildingBlockScope } from '@aws-blocks/core/cdk';
-import { registerConfig, synthGuard, SHARED_HANDLER_TIMEOUT_SECONDS } from '@aws-blocks/core/cdk';
+import {
+	BuildingBlockScope,
+	registerConfig,
+	SHARED_HANDLER_TIMEOUT_SECONDS,
+	synthGuard,
+	withSystemIdentityScope,
+} from '@aws-blocks/core/cdk';
 import { DistributedTable } from '@aws-blocks/bb-distributed-table';
 import { LambdaCompute } from '@aws-blocks/bb-lambda-compute/cdk';
 import { sanitizeConfigKey } from '@aws-blocks/core/bb-utils';
@@ -161,7 +166,9 @@ export class AsyncJob<T = unknown> extends BuildingBlockScope {
 		// Same child id and options as the runtime entry points, so the provisioned
 		// table is the one JobStatusTracker resolves at request time.
 		if (options.trackStatus) {
-			new DistributedTable(this, STATUS_TABLE_ID, statusTableOptions as never);
+			withSystemIdentityScope(this, () =>
+				new DistributedTable(this, STATUS_TABLE_ID, statusTableOptions as never),
+			);
 		}
 	}
 

@@ -4,6 +4,7 @@
 // This will be bundled with the customer's backend code
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { ApiError } from './errors.js';
+import { runWithRequestScope } from './common/identity-context.js';
 import { BLOCKS_RPC_PREFIX } from './constants.js';
 import { matchRoute, lockRouteRegistry, getRegisteredRoutes, getLoadedCoreCopies } from './raw-route.js';
 import { registerBuiltinRoutes } from './builtin-routes.js';
@@ -599,16 +600,24 @@ function createHandler(backend: any) {
         return { statusCode: 200, headers: rpcHeaders, body: methodNotFoundResponse(`API '${apiNamespace}' not found`, rpcId) };
       }
 
-      // Call the handler to get methods
-      const apiMethods = typeof apiHandler === 'function'
-        ? apiHandler(context)
-        : apiHandler;
+      const { methodFound, result } = await runWithRequestScope(
+        context,
+        async () => {
+          const apiMethods = typeof apiHandler === 'function'
+            ? apiHandler(context)
+            : apiHandler;
 
-      if (!apiMethods[method]) {
+          if (!apiMethods[method]) {
+            return { methodFound: false as const, result: undefined };
+          }
+
+          return { methodFound: true as const, result: await apiMethods[method](...args) };
+        },
+      );
+
+      if (!methodFound) {
         return { statusCode: 200, headers: rpcHeaders, body: methodNotFoundResponse(`'${method}' on API '${apiNamespace}'`, rpcId) };
       }
-
-      const result = await apiMethods[method](...args);
 
       return {
         statusCode: responseStatus,
@@ -666,7 +675,7 @@ async function handleRawRoute(
   };
 
   try {
-    await route.handler(context);
+    await runWithRequestScope(context, () => route.handler(context));
 
     return {
       statusCode: responseStatus,

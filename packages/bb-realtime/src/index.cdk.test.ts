@@ -8,17 +8,17 @@
  * on the CDK construct throws an actionable error instead of a cryptic
  * `X is not a function` TypeError.
  */
-import { test, before, after } from 'node:test';
 import assert from 'node:assert';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import * as cdk from 'aws-cdk-lib';
-import { Template, Match } from 'aws-cdk-lib/assertions';
-import { BlocksStack, BlocksPresets, type BlocksDefaults } from '@aws-blocks/core/cdk';
-import type { DefaultComputeFactory } from '@aws-blocks/core/cdk/internal';
+import { after, before, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { LambdaCompute } from '@aws-blocks/bb-lambda-compute/cdk';
+import { type BlocksDefaults, BlocksPresets, BlocksStack } from '@aws-blocks/core/cdk';
+import type { DefaultComputeFactory } from '@aws-blocks/core/cdk/internal';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
+import * as cdk from 'aws-cdk-lib';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import { Realtime } from './index.cdk.js';
 
 test('CDK: calling a runtime method throws an actionable error (not a cryptic TypeError)', () => {
@@ -54,7 +54,6 @@ let backendPath: string;
 let tmpDir: string;
 
 before(() => {
-	process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ''} --conditions=cdk`;
 	tmpDir = mkdtempSync(join(__dirname, 'tmp-rt-cdk-'));
 	handlerPath = join(tmpDir, 'handler.mjs');
 	writeFileSync(handlerPath, "export const handler = async () => ({ statusCode: 200, body: '{}' });\n");
@@ -95,6 +94,24 @@ test('CDK: the WebSocket stage carries the production message throttle (1000/200
 			ThrottlingBurstLimit: 2000,
 		}),
 	});
+});
+
+test('CDK: identity-bound compute keeps connections bookkeeping on the system execution role', async () => {
+	const app = new cdk.App();
+	const stack = await BlocksStack.create(app, 'RtIdentityConnections', {
+		backendHandlerPath: handlerPath,
+		backendCDKPath: backendPath,
+		defaults: BlocksPresets.production,
+		defaultComputeFactory: lambdaFactory,
+	});
+	(stack._defaultCompute as LambdaCompute).identityProviderFullId = 'RtIdentityConnections/pool';
+	new Realtime(stack, 'rt', { namespaces: { chat: Realtime.namespace(passthroughSchema) } });
+
+	const template = Template.fromStack(stack);
+	template.resourceCountIs('AWS::DynamoDB::Table', 1);
+	const policy = JSON.stringify(template.toJSON());
+	assert.ok(policy.includes('dynamodb:PutItem'), 'connection writes must use the system execution role');
+	assert.ok(policy.includes('BlocksRole'), 'connection bookkeeping retains the shared execution role');
 });
 
 test('CDK: sandbox caps the WebSocket stage tighter (200/400)', async () => {

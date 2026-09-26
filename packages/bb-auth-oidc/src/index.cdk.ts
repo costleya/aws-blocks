@@ -29,7 +29,7 @@
  */
 
 import type { ScopeParent } from '@aws-blocks/core';
-import { BuildingBlockScope, registerConfig, DEFAULT_NODE_RUNTIME } from '@aws-blocks/core/cdk';
+import { BuildingBlockScope, registerConfig, DEFAULT_NODE_RUNTIME, withSystemIdentityScope } from '@aws-blocks/core/cdk';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { AppSetting, SECRETS_BULK_CONSTRUCT_ID } from '@aws-blocks/bb-app-setting';
 import { KVStore } from '@aws-blocks/bb-kv-store';
@@ -116,7 +116,7 @@ export class AuthOIDC<
 		registerConfig(this, cookieSecretEnvVar(this.fullId), `/${this.fullId}-cookie-secret-${id}`);
 
 		// Session store — always provisioned.
-		new KVStore(this, 'sessions');
+		withSystemIdentityScope(this, () => new KVStore(this, 'sessions'));
 
 		// When `cognitoFederated` providers are configured, provision the
 		// Cognito User Pool, App Client, domain, and IdP registrations.

@@ -1,19 +1,29 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { Scope, registerSdkIdentifiers, getSdkIdentifiers, ApiError } from '@aws-blocks/core';
-import type { ScopeParent } from '@aws-blocks/core';
-import { Logger } from '@aws-blocks/bb-logger';
 import type { ChildLogger } from '@aws-blocks/bb-logger';
-import { BB_NAME, BB_VERSION } from './version.js';
+import { Logger } from '@aws-blocks/bb-logger';
+import type { ScopeParent } from '@aws-blocks/core';
+import { ApiError, getSdkIdentifiers, registerSdkIdentifiers, Scope } from '@aws-blocks/core';
+import { captureRequestIdentity, withRequestAwsClient } from '@aws-blocks/core/bb-utils';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { KVStoreErrors } from './errors.js';
-import { TTL_ATTRIBUTE, isExpired, resolveTtlEpochSeconds } from './ttl.js';
+import { isExpired, resolveTtlEpochSeconds, TTL_ATTRIBUTE } from './ttl.js';
+import { BB_NAME, BB_VERSION } from './version.js';
 
 // Re-export public types and errors
 export { KVStoreErrors } from './errors.js';
-export type { ConditionalWriteOptions, ConditionalDeleteOptions, PutOptions, KVStoreOptions, ExternalTableRef, ScanOptions } from './types.js';
+export type {
+	ConditionalDeleteOptions,
+	ConditionalWriteOptions,
+	ExternalTableRef,
+	KVStoreOperation,
+	KVStoreOptions,
+	PutOptions,
+	ScanOptions,
+} from './types.js';
+
 import type { ScanOptions } from './types.js';
 
 /**
@@ -62,13 +72,17 @@ export class KVStore<T = string> extends Scope {
 	 * @returns The value, or `null` if the key does not exist or has expired.
 	 */
 	async get(key: string): Promise<T | null> {
-		const result = await this.docClient.send(new GetCommand({
-			TableName: getSdkIdentifiers(this).tableName,
-			Key: { pk: key },
-		}));
-		if (!result.Item) return null;
-		if (isExpired(result.Item[TTL_ATTRIBUTE])) return null;
-		return JSON.parse(result.Item.value) as T;
+		return this.withDocumentClient(async (docClient) => {
+			const result = await docClient.send(
+				new GetCommand({
+					TableName: getSdkIdentifiers(this).tableName,
+					Key: { pk: key },
+				}),
+			);
+			if (!result.Item) return null;
+			if (isExpired(result.Item[TTL_ATTRIBUTE])) return null;
+			return JSON.parse(result.Item.value) as T;
+		});
 	}
 
 	/**
@@ -86,84 +100,90 @@ export class KVStore<T = string> extends Scope {
 	 * @throws {KVStoreErrors.ValidationFailed} If both `ttlSeconds` and `expiresAt` are set, or either is not a usable time.
 	 */
 	async put(key: string, value: T, options?: import('./index.mock.js').PutOptions<T>): Promise<void> {
-		if (this.schema) {
-			const result = this.schema['~standard'].validate(value);
-			const resolved = result instanceof Promise ? await result : result;
-			if (resolved.issues) {
-				const err = new Error(`ValidationFailedException: ${resolved.issues[0].message}`);
-				err.name = 'ValidationFailedException';
+		await this.withDocumentClient(async (docClient) => {
+			if (this.schema) {
+				const result = this.schema['~standard'].validate(value);
+				const resolved = result instanceof Promise ? await result : result;
+				if (resolved.issues) {
+					const err = new Error(`ValidationFailedException: ${resolved.issues[0].message}`);
+					err.name = 'ValidationFailedException';
+					throw err;
+				}
+			}
+
+			const expiresAtEpochSeconds = resolveTtlEpochSeconds(options);
+			const item: Record<string, unknown> = { pk: key, value: JSON.stringify(value) };
+			if (expiresAtEpochSeconds !== undefined) item[TTL_ATTRIBUTE] = expiresAtEpochSeconds;
+
+			const command: any = {
+				TableName: getSdkIdentifiers(this).tableName,
+				Item: item,
+			};
+
+			// `ifNotExists` and `ifValueEquals` compose with OR: write when the key is
+			// absent OR its current value matches — the optimistic "create it, or update
+			// it only if unchanged" pattern. (AND would be unsatisfiable: a key can't be
+			// both absent and have a matching value.)
+			const conditions: string[] = [];
+			const names: Record<string, string> = {};
+			const values: Record<string, unknown> = {};
+			if (options?.ifNotExists === true) {
+				conditions.push('attribute_not_exists(#pk)');
+				names['#pk'] = 'pk';
+			}
+			// Detect with `!== undefined` (not `in options`) to match the mock: an
+			// explicit `{ ifValueEquals: undefined }` is a no-op on both layers, rather
+			// than emitting `#value = :expected` with an undefined value the SDK rejects.
+			if (options?.ifValueEquals !== undefined) {
+				conditions.push('#value = :expected');
+				names['#value'] = 'value';
+				values[':expected'] = JSON.stringify(options.ifValueEquals);
+			}
+			if (conditions.length > 0) {
+				command.ConditionExpression = conditions.join(' OR ');
+				command.ExpressionAttributeNames = names;
+				if (Object.keys(values).length > 0) command.ExpressionAttributeValues = values;
+			}
+
+			try {
+				await docClient.send(new PutCommand(command));
+			} catch (err: unknown) {
+				if (
+					err instanceof Error &&
+					err.name === 'ValidationException' &&
+					/size has exceeded/i.test(err.message)
+				) {
+					const sized = new Error(err.message);
+					sized.name = KVStoreErrors.ItemTooLarge;
+					throw sized;
+				}
+				// A failed conditional write is a Conflict, not an
+				// InternalServerError: map DynamoDB's raw
+				// ConditionalCheckFailedException to an ApiError with status 409 so
+				// the JSON-RPC serializer emits code 409 instead of 500. Preserve the
+				// name (== KVStoreErrors.ConditionalCheckFailed) so isBlocksError()
+				// keeps matching, and keep the driver error as `cause` (server-side).
+				// DynamoDB collapses every conditional failure under one exception with
+				// no sub-reason, so retriability is derived from the conditions THIS
+				// call set, matching the mock branch-for-branch. `ifNotExists` and
+				// `ifValueEquals` compose with OR, so a failure means every arm failed:
+				// if a value arm participated (`ifValueEquals` set) the failure is the
+				// stale-value case (key exists, value differs) — an optimistic-lock
+				// conflict that IS retriable (re-read and retry). A pure `ifNotExists`
+				// failure (no value arm) means the key already exists and is NOT
+				// retriable. Hence: retriable iff `ifValueEquals` was set (value
+				// presence, so an explicit `undefined` is treated as absent).
+				if (err instanceof Error && err.name === KVStoreErrors.ConditionalCheckFailed) {
+					const retriable = options?.ifValueEquals !== undefined;
+					throw new ApiError('The conditional request failed', 409, {
+						name: KVStoreErrors.ConditionalCheckFailed,
+						cause: err,
+						retriable,
+					});
+				}
 				throw err;
 			}
-		}
-
-		const expiresAtEpochSeconds = resolveTtlEpochSeconds(options);
-		const item: Record<string, unknown> = { pk: key, value: JSON.stringify(value) };
-		if (expiresAtEpochSeconds !== undefined) item[TTL_ATTRIBUTE] = expiresAtEpochSeconds;
-
-		const command: any = {
-			TableName: getSdkIdentifiers(this).tableName,
-			Item: item,
-		};
-
-		// `ifNotExists` and `ifValueEquals` compose with OR: write when the key is
-		// absent OR its current value matches — the optimistic "create it, or update
-		// it only if unchanged" pattern. (AND would be unsatisfiable: a key can't be
-		// both absent and have a matching value.)
-		const conditions: string[] = [];
-		const names: Record<string, string> = {};
-		const values: Record<string, unknown> = {};
-		if (options?.ifNotExists === true) {
-			conditions.push('attribute_not_exists(#pk)');
-			names['#pk'] = 'pk';
-		}
-		// Detect with `!== undefined` (not `in options`) to match the mock: an
-		// explicit `{ ifValueEquals: undefined }` is a no-op on both layers, rather
-		// than emitting `#value = :expected` with an undefined value the SDK rejects.
-		if (options?.ifValueEquals !== undefined) {
-			conditions.push('#value = :expected');
-			names['#value'] = 'value';
-			values[':expected'] = JSON.stringify(options.ifValueEquals);
-		}
-		if (conditions.length > 0) {
-			command.ConditionExpression = conditions.join(' OR ');
-			command.ExpressionAttributeNames = names;
-			if (Object.keys(values).length > 0) command.ExpressionAttributeValues = values;
-		}
-
-		try {
-			await this.docClient.send(new PutCommand(command));
-		} catch (err: unknown) {
-			if (err instanceof Error && err.name === 'ValidationException' && /size has exceeded/i.test(err.message)) {
-				const sized = new Error(err.message);
-				sized.name = KVStoreErrors.ItemTooLarge;
-				throw sized;
-			}
-			// A failed conditional write is a Conflict, not an
-			// InternalServerError: map DynamoDB's raw
-			// ConditionalCheckFailedException to an ApiError with status 409 so
-			// the JSON-RPC serializer emits code 409 instead of 500. Preserve the
-			// name (== KVStoreErrors.ConditionalCheckFailed) so isBlocksError()
-			// keeps matching, and keep the driver error as `cause` (server-side).
-			// DynamoDB collapses every conditional failure under one exception with
-			// no sub-reason, so retriability is derived from the conditions THIS
-			// call set, matching the mock branch-for-branch. `ifNotExists` and
-			// `ifValueEquals` compose with OR, so a failure means every arm failed:
-			// if a value arm participated (`ifValueEquals` set) the failure is the
-			// stale-value case (key exists, value differs) — an optimistic-lock
-			// conflict that IS retriable (re-read and retry). A pure `ifNotExists`
-			// failure (no value arm) means the key already exists and is NOT
-			// retriable. Hence: retriable iff `ifValueEquals` was set (value
-			// presence, so an explicit `undefined` is treated as absent).
-			if (err instanceof Error && err.name === KVStoreErrors.ConditionalCheckFailed) {
-				const retriable = options?.ifValueEquals !== undefined;
-				throw new ApiError('The conditional request failed', 409, {
-					name: KVStoreErrors.ConditionalCheckFailed,
-					cause: err,
-					retriable,
-				});
-			}
-			throw err;
-		}
+		});
 	}
 
 	/**
@@ -175,56 +195,58 @@ export class KVStore<T = string> extends Scope {
 	 * @throws {KVStoreErrors.ConditionalCheckFailed} If `ifValueEquals` is set and the current value does not match. Serializes to HTTP 409 (Conflict), retriable (optimistic-lock conflict — re-read and retry).
 	 */
 	async delete(key: string, conditions?: import('./index.mock.js').ConditionalDeleteOptions<T>): Promise<void> {
-		const command: any = {
-			TableName: getSdkIdentifiers(this).tableName,
-			Key: { pk: key },
-		};
+		await this.withDocumentClient(async (docClient) => {
+			const command: any = {
+				TableName: getSdkIdentifiers(this).tableName,
+				Key: { pk: key },
+			};
 
-		// Delete conditions are conjunctive — both `ifExists` and `ifValueEquals`
-		// must hold — so compose them with AND, matching the mock (which checks
-		// existence, then value, and requires both). Detect `ifValueEquals` with
-		// `!== undefined` (not `in conditions`), exactly like `put` and the mock: an
-		// explicit `{ ifValueEquals: undefined }` is a no-op on both layers, rather
-		// than emitting `#value = JSON.stringify(undefined)` (a DynamoDB
-		// marshalling error) here but nothing on the mock.
-		const deleteConditions: string[] = [];
-		const names: Record<string, string> = {};
-		const attrValues: Record<string, unknown> = {};
-		if (conditions?.ifExists) {
-			deleteConditions.push('attribute_exists(#pk)');
-			names['#pk'] = 'pk';
-		}
-		if (conditions?.ifValueEquals !== undefined) {
-			deleteConditions.push('#value = :expected');
-			names['#value'] = 'value';
-			attrValues[':expected'] = JSON.stringify(conditions.ifValueEquals);
-		}
-		if (deleteConditions.length > 0) {
-			command.ConditionExpression = deleteConditions.join(' AND ');
-			command.ExpressionAttributeNames = names;
-			if (Object.keys(attrValues).length > 0) command.ExpressionAttributeValues = attrValues;
-		}
-
-		try {
-			await this.docClient.send(new DeleteCommand(command));
-		} catch (err: unknown) {
-			// A failed conditional delete is a Conflict, not an
-			// InternalServerError: map DynamoDB's raw
-			// ConditionalCheckFailedException to an ApiError with status 409 (see
-			// Retriability is derived from the conditions THIS call set (see the
-			// put path): existence assertion wins — retriable only for a pure
-			// `ifValueEquals` optimistic-lock check (value presence) and NOT when
-			// `ifExists` is also set. Matches the mock path.
-			if (err instanceof Error && err.name === KVStoreErrors.ConditionalCheckFailed) {
-				const retriable = conditions?.ifValueEquals !== undefined && !conditions?.ifExists;
-				throw new ApiError('The conditional request failed', 409, {
-					name: KVStoreErrors.ConditionalCheckFailed,
-					cause: err,
-					retriable,
-				});
+			// Delete conditions are conjunctive — both `ifExists` and `ifValueEquals`
+			// must hold — so compose them with AND, matching the mock (which checks
+			// existence, then value, and requires both). Detect `ifValueEquals` with
+			// `!== undefined` (not `in conditions`), exactly like `put` and the mock: an
+			// explicit `{ ifValueEquals: undefined }` is a no-op on both layers, rather
+			// than emitting `#value = JSON.stringify(undefined)` (a DynamoDB
+			// marshalling error) here but nothing on the mock.
+			const deleteConditions: string[] = [];
+			const names: Record<string, string> = {};
+			const attrValues: Record<string, unknown> = {};
+			if (conditions?.ifExists) {
+				deleteConditions.push('attribute_exists(#pk)');
+				names['#pk'] = 'pk';
 			}
-			throw err;
-		}
+			if (conditions?.ifValueEquals !== undefined) {
+				deleteConditions.push('#value = :expected');
+				names['#value'] = 'value';
+				attrValues[':expected'] = JSON.stringify(conditions.ifValueEquals);
+			}
+			if (deleteConditions.length > 0) {
+				command.ConditionExpression = deleteConditions.join(' AND ');
+				command.ExpressionAttributeNames = names;
+				if (Object.keys(attrValues).length > 0) command.ExpressionAttributeValues = attrValues;
+			}
+
+			try {
+				await docClient.send(new DeleteCommand(command));
+			} catch (err: unknown) {
+				// A failed conditional delete is a Conflict, not an
+				// InternalServerError: map DynamoDB's raw
+				// ConditionalCheckFailedException to an ApiError with status 409 (see
+				// Retriability is derived from the conditions THIS call set (see the
+				// put path): existence assertion wins — retriable only for a pure
+				// `ifValueEquals` optimistic-lock check (value presence) and NOT when
+				// `ifExists` is also set. Matches the mock path.
+				if (err instanceof Error && err.name === KVStoreErrors.ConditionalCheckFailed) {
+					const retriable = conditions?.ifValueEquals !== undefined && !conditions?.ifExists;
+					throw new ApiError('The conditional request failed', 409, {
+						name: KVStoreErrors.ConditionalCheckFailed,
+						cause: err,
+						retriable,
+					});
+				}
+				throw err;
+			}
+		});
 	}
 
 	/**
@@ -235,16 +257,29 @@ export class KVStore<T = string> extends Scope {
 	 *
 	 * @returns An async iterable of key-value entries.
 	 */
-	async *scan(options?: ScanOptions): AsyncIterable<{ key: string; value: T }> {
+	scan(options?: ScanOptions): AsyncIterable<{ key: string; value: T }> {
+		return this.scanPages(options, captureRequestIdentity(this));
+	}
+
+	private async *scanPages(
+		options: ScanOptions | undefined,
+		assertRequestIdentity: () => void,
+	): AsyncIterable<{ key: string; value: T }> {
 		const includeExpired = options?.includeExpired === true;
 		let lastKey: Record<string, any> | undefined;
 		do {
-			const result = await this.docClient.send(new ScanCommand({
-				TableName: getSdkIdentifiers(this).tableName,
-				ExclusiveStartKey: lastKey,
-			}));
+			assertRequestIdentity();
+			const result = await this.withDocumentClient((docClient) =>
+				docClient.send(
+					new ScanCommand({
+						TableName: getSdkIdentifiers(this).tableName,
+						ExclusiveStartKey: lastKey,
+					}),
+				),
+			);
 			for (const item of result.Items ?? []) {
 				if (!includeExpired && isExpired(item[TTL_ATTRIBUTE])) continue;
+				assertRequestIdentity();
 				yield { key: item.pk as string, value: JSON.parse(item.value as string) as T };
 			}
 			lastKey = result.LastEvaluatedKey;
@@ -259,5 +294,20 @@ export class KVStore<T = string> extends Scope {
 	 */
 	static fromExisting(tableName: string): import('./index.mock.js').ExternalTableRef {
 		return { __brand: 'ExternalTableRef' as const, tableName };
+	}
+
+	private async withDocumentClient<R>(callback: (docClient: DynamoDBDocumentClient) => Promise<R>): Promise<R> {
+		return withRequestAwsClient(
+			this,
+			this.docClient,
+			(credentials) =>
+				DynamoDBDocumentClient.from(
+					new DynamoDBClient({
+						customUserAgent: this.buildUserAgentChain(),
+						credentials,
+					}),
+				),
+			callback,
+		);
 	}
 }

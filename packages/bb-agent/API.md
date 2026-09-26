@@ -56,6 +56,7 @@ export const AgentErrors: {
     readonly InvalidModelConfig: "InvalidModelConfigException";
     readonly ModelUnavailable: "ModelUnavailableException";
     readonly BrowserNotSupported: "BrowserNotSupportedException";
+    readonly IdentityComputeUnsupported: "IdentityComputeUnsupportedException";
     readonly StreamFailed: "StreamFailedException";
     readonly InterruptRequired: "InterruptRequiredException";
 };

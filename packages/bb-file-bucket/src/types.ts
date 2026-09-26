@@ -6,10 +6,18 @@
  * This file has zero runtime dependencies — types only.
  */
 import type { ChildLogger } from '@aws-blocks/bb-logger';
+import type { IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 
 // ── Constructor options ─────────────────────────────────────────────────────
 
 export interface FileBucketOptions {
+	/**
+	 * Identity operations this bucket permits when its compute has an identity
+	 * provider. Grants belong to the resource: declare the supported FileBucket
+	 * operations, access level, and optional object-key patterns. An omitted
+	 * `keyPatterns` grants its listed operations for every key.
+	 */
+	identityAccess?: readonly IdentityResourceGrant<FileBucketOperation>[];
 	/**
 	 * Enable object versioning. Default: true. Pass `false` to opt out.
 	 *
@@ -89,6 +97,20 @@ export interface FileBucketOptions {
 	logger?: ChildLogger;
 }
 
+/** Operations that an identity resource grant can authorize for a FileBucket. */
+export type FileBucketOperation =
+	| 'put'
+	| 'get'
+	| 'delete'
+	| 'deleteBatch'
+	| 'getUrl'
+	| 'putUrl'
+	| 'getFileHandle'
+	| 'createUploadHandle'
+	| 'scan'
+	| 'listVersions'
+	| 'restoreVersion';
+
 // ── Method options ──────────────────────────────────────────────────────────
 
 export interface PutOptions {
@@ -147,8 +169,9 @@ export interface VersionedGetUrlOptions extends GetUrlOptions {
  * a variable) or an absent `versioned` resolves to the versioned-aware shape,
  * matching the default-on runtime behavior.
  */
-export type GetOptionsFor<O extends FileBucketOptions> =
-	O extends { versioned: false } ? undefined : VersionedGetOptions;
+export type GetOptionsFor<O extends FileBucketOptions> = O extends { versioned: false }
+	? undefined
+	: VersionedGetOptions;
 
 /**
  * Resolves the delete options type based on whether versioning is enabled.
@@ -156,8 +179,9 @@ export type GetOptionsFor<O extends FileBucketOptions> =
  * Versioning is on by default, so only an explicit `versioned: false` selects
  * the non-versioned (optionless) shape.
  */
-export type DeleteOptionsFor<O extends FileBucketOptions> =
-	O extends { versioned: false } ? undefined : VersionedDeleteOptions;
+export type DeleteOptionsFor<O extends FileBucketOptions> = O extends { versioned: false }
+	? undefined
+	: VersionedDeleteOptions;
 
 /**
  * Resolves the getUrl/getFileHandle options type based on whether versioning is enabled.
@@ -165,8 +189,9 @@ export type DeleteOptionsFor<O extends FileBucketOptions> =
  * Versioning is on by default, so only an explicit `versioned: false` selects
  * the non-versioned shape.
  */
-export type GetUrlOptionsFor<O extends FileBucketOptions> =
-	O extends { versioned: false } ? GetUrlOptions : VersionedGetUrlOptions;
+export type GetUrlOptionsFor<O extends FileBucketOptions> = O extends { versioned: false }
+	? GetUrlOptions
+	: VersionedGetUrlOptions;
 
 // ── Return types ────────────────────────────────────────────────────────────
 

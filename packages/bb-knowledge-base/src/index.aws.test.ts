@@ -5,7 +5,8 @@ import { test, describe, mock, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { BedrockAgentRuntimeClient } from '@aws-sdk/client-bedrock-agent-runtime';
 import { BedrockAgentClient } from '@aws-sdk/client-bedrock-agent';
-import { isBlocksError } from '@aws-blocks/core';
+import { type BlocksContext, isBlocksError, Scope } from '@aws-blocks/core';
+import { assumeRequestIdentity, clearRequestIdentity, runWithIdentity, runWithRequestScope } from '@aws-blocks/core/bb-utils';
 import { KnowledgeBaseErrors, KnowledgeBase } from './index.aws.js';
 
 // ── SDK mock helpers ───────────────────────────────────────────────────────
@@ -28,6 +29,39 @@ function setKbEnv(scopeId: string, instanceId: string, kbId = 'kb-test-123') {
 	process.env[`${prefix}_KB_ID`] = kbId;
 	return () => {
 		delete process.env[`${prefix}_KB_ID`];
+	};
+}
+
+type SignedRequest = { headers: Record<string, string | undefined> };
+
+function identity(identityId: string, accessKeyId: string, sessionToken: string) {
+	return {
+		identityId,
+		mode: 'aws' as const,
+		credentials: {
+			accessKeyId,
+			secretAccessKey: `${accessKeyId}-secret`,
+			sessionToken,
+			expiration: new Date(Date.now() + 60_000),
+		},
+	};
+}
+
+function authorizationCredential(request: SignedRequest): string | undefined {
+	return request.headers.authorization?.match(/Credential=([^/]+)/)?.[1];
+}
+
+function identityRequestContext(): BlocksContext {
+	return {
+		request: {
+			headers: new Headers(),
+			body: null,
+			json: async () => undefined,
+			text: async () => '',
+			url: new URL('https://example.test/aws-blocks/api'),
+			params: {},
+		},
+		response: { headers: new Headers(), status: 200, send: () => {} },
 	};
 }
 
@@ -169,6 +203,87 @@ describe('retrieve validation', () => {
 			cleanup();
 		}
 	});
+});
+
+// ── identity-scoped AWS credentials ───────────────────────────────────────
+
+test('identity-scoped retrieval signs each request with its active credential snapshot and never falls back to the execution role', async () => {
+	const previous = {
+		accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+		secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+		sessionToken: process.env.AWS_SESSION_TOKEN,
+	};
+	process.env.AWS_ACCESS_KEY_ID = 'EXECUTION_ROLE_ACCESS_KEY';
+	process.env.AWS_SECRET_ACCESS_KEY = 'execution-role-secret';
+	process.env.AWS_SESSION_TOKEN = 'execution-role-token';
+
+	const signed: SignedRequest[] = [];
+	const originalSend = BedrockAgentRuntimeClient.prototype.send;
+	const originalDestroy = BedrockAgentRuntimeClient.prototype.destroy;
+	let destroyed = 0;
+	const sendMock = mock.method(
+		BedrockAgentRuntimeClient.prototype,
+		'send',
+		function (this: BedrockAgentRuntimeClient, command: never, ...args: never[]) {
+			(this.middlewareStack.add as any)(
+				(_next: any) => async (middlewareArgs: any) => {
+					signed.push(middlewareArgs.request as SignedRequest);
+					return { response: {}, output: { retrievalResults: [], $metadata: {} } };
+				},
+				{ step: 'finalizeRequest', name: 'identity-signing-capture', priority: 'low' },
+			);
+			return (originalSend as any).call(this, command, ...args);
+		},
+	);
+	const destroyMock = mock.method(BedrockAgentRuntimeClient.prototype, 'destroy', function (this: BedrockAgentRuntimeClient) {
+		destroyed += 1;
+		return originalDestroy.call(this);
+	});
+
+	const cleanup = setKbEnv('IDENTITY', 'DOCS');
+	try {
+		const pool = 'app/identity-pool';
+		const scope = new Scope('identity', { compute: { identityProviderFullId: pool } });
+		const kb = new KnowledgeBase(scope, 'docs', {
+			source: './knowledge',
+			identityAccess: [{ access: 'authenticated', operations: ['retrieve'] }],
+		});
+		const alice = identity('ap-northeast-1:alice', 'ALICE_ACCESS_KEY', 'alice-session-token');
+		const bob = identity('ap-northeast-1:bob', 'BOB_ACCESS_KEY', 'bob-session-token');
+
+		await Promise.all([
+			runWithIdentity(pool, alice, () => kb.retrieve('alice query')),
+			runWithIdentity(pool, bob, () => kb.retrieve('bob query')),
+		]);
+
+		assert.deepStrictEqual(signed.map(authorizationCredential).sort(), ['ALICE_ACCESS_KEY', 'BOB_ACCESS_KEY']);
+		assert.deepStrictEqual(signed.map(request => request.headers['x-amz-security-token']).sort(), [
+			'alice-session-token',
+			'bob-session-token',
+		]);
+		assert.ok(
+			signed.every(request => authorizationCredential(request) !== 'EXECUTION_ROLE_ACCESS_KEY'),
+			'identity-bound requests must never use execution-role credentials',
+		);
+		assert.strictEqual(destroyed, 2, 'each identity request owns and destroys its client');
+
+		const beforeDenied = signed.length;
+		await kb.retrieve('unassumed query');
+		assert.strictEqual(authorizationCredential(signed.at(-1)!), 'EXECUTION_ROLE_ACCESS_KEY');
+		await assert.rejects(
+			() => runWithIdentity(pool, { ...alice, credentials: { ...alice.credentials, expiration: new Date(Date.now() + 30_000) } }, () => kb.retrieve('expired')),
+			{ name: 'IdentityPool.Unauthorized' },
+		);
+		assert.strictEqual(signed.length, beforeDenied + 1, 'expired identities must not reach Bedrock');
+	} finally {
+		sendMock.mock.restore();
+		destroyMock.mock.restore();
+		cleanup();
+		for (const [key, value] of Object.entries(previous)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
 });
 
 // ── retrieve() — mapResultItem tested indirectly via SDK mock ──────────────
@@ -741,6 +856,51 @@ describe('isSynced', () => {
 // ── Sync — waitUntilSynced() ─────────────────────────────────────────────────
 
 describe('waitUntilSynced', () => {
+	test('stops polling when its originating identity request closes and releases the client', async () => {
+		const cleanup = setSyncEnv('IDENTITY-WAIT', 'WUR16');
+		const pool = 'test/knowledge-wait-pool';
+		let sends = 0;
+		let destroyed = 0;
+		let firstPollDestroyed: (() => void) | undefined;
+		const firstPollDone = new Promise<void>((resolve) => {
+			firstPollDestroyed = resolve;
+		});
+		const originalDestroy = BedrockAgentClient.prototype.destroy;
+		const destroyMock = mock.method(BedrockAgentClient.prototype, 'destroy', function (this: BedrockAgentClient) {
+			destroyed++;
+			originalDestroy.call(this);
+			firstPollDestroyed?.();
+		});
+		mockAgentSend(() => {
+			sends++;
+			return { ingestionJobSummaries: [{ ingestionJobId: 'j', status: 'IN_PROGRESS' }] };
+		});
+		try {
+			const scope = new Scope('identity-wait', { compute: { identityProviderFullId: pool } });
+			const kb = new KnowledgeBase(scope, 'wur16', { source: './knowledge' });
+			const request = identityRequestContext();
+			let pending: Promise<void> | undefined;
+			await runWithRequestScope(request, async () => {
+				const attempt = clearRequestIdentity(pool, request);
+				assumeRequestIdentity(
+					pool,
+					request,
+					identity('ap-northeast-1:alice', 'ALICE_WAIT_KEY', 'alice-wait-token'),
+					attempt,
+				);
+				pending = kb.waitUntilSynced({ timeoutMs: 1000, pollIntervalMs: 20 });
+				await firstPollDone;
+			});
+			assert.ok(pending);
+			await assert.rejects(pending, { name: 'IdentityPool.Unauthorized' });
+			assert.strictEqual(sends, 1, 'the closed request must not make another Bedrock call');
+			assert.strictEqual(destroyed, 1, 'the first poll must release its identity client');
+		} finally {
+			destroyMock.mock.restore();
+			cleanup();
+		}
+	});
+
 	test('resolves immediately when ingestion is already COMPLETE', async () => {
 		const cleanup = setSyncEnv('TEST', 'WUR1');
 		mockAgentSend(() => ({ ingestionJobSummaries: [{ ingestionJobId: 'j', status: 'COMPLETE' }] }));

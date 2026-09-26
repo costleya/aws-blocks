@@ -2,18 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ScopeParent } from '@aws-blocks/core';
-import type { KnowledgeBaseOptions, RetrieveOptions, RetrieveResult, WaitUntilSyncedOptions } from './types.js';
 import { KnowledgeBaseErrors } from './errors.js';
+import type { KnowledgeBaseOptions, RetrieveOptions, RetrieveResult, WaitUntilSyncedOptions } from './types.js';
 
-export type {
-	KnowledgeBaseOptions, SourceConfig,
-	ChunkingConfig, ChunkingStrategy,
-	RetrieveOptions, RetrieveResult,
-	MetadataFilter, WaitUntilSyncedOptions,
-} from './types.js';
 export { KnowledgeBaseErrors } from './errors.js';
+export type {
+	ChunkingConfig,
+	ChunkingStrategy,
+	KnowledgeBaseOperation,
+	KnowledgeBaseOptions,
+	MetadataFilter,
+	RetrieveOptions,
+	RetrieveResult,
+	SourceConfig,
+	WaitUntilSyncedOptions,
+} from './types.js';
 
-const BROWSER_ERROR = 'KnowledgeBase is server-side only. Use it in server actions, API routes, or Lambda handlers — not in browser code.';
+const BROWSER_ERROR =
+	'KnowledgeBase is server-side only. Use it in server actions, API routes, or Lambda handlers — not in browser code.';
 
 function browserError(): Error {
 	const err = new Error(`${KnowledgeBaseErrors.BrowserNotSupported}: ${BROWSER_ERROR}`);

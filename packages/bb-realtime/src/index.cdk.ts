@@ -19,8 +19,14 @@ import { WebSocketApi, WebSocketStage, LogGroupLogDestination } from 'aws-cdk-li
 import { WebSocketLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { AccessLogFormat } from 'aws-cdk-lib/aws-apigateway';
 import { LogGroup } from 'aws-cdk-lib/aws-logs';
-import { BuildingBlockScope, synthGuard, ensureApiGatewayAccount, blocksError } from '@aws-blocks/core/cdk';
-import { registerConfig } from '@aws-blocks/core/cdk';
+import {
+	blocksError,
+	BuildingBlockScope,
+	ensureApiGatewayAccount,
+	registerConfig,
+	synthGuard,
+	withSystemIdentityScope,
+} from '@aws-blocks/core/cdk';
 import { LambdaCompute } from '@aws-blocks/bb-lambda-compute/cdk';
 import { AppSetting } from '@aws-blocks/bb-app-setting';
 import { DistributedTable } from '@aws-blocks/bb-distributed-table';
@@ -76,12 +82,14 @@ function getOrCreateSharedInfra(stack: cdk.Stack, handler: cdk.aws_lambda.IFunct
 	new AppSetting(parent, 'token-secret', { secret: true });
 
 	// ── DynamoDB connections table via DistributedTable ──────────────────
-	new DistributedTable(parent, 'connections', {
-		schema: connectionsSchema,
-		key: { partitionKey: 'connectionId', sortKey: 'channel' },
-		indexes: { 'channel-index': { partitionKey: 'channel', sortKey: 'connectionId' } },
-		ttl: 'expiresAt',
-	});
+	withSystemIdentityScope(parent, () =>
+		new DistributedTable(parent, 'connections', {
+			schema: connectionsSchema,
+			key: { partitionKey: 'connectionId', sortKey: 'channel' },
+			indexes: { 'channel-index': { partitionKey: 'channel', sortKey: 'connectionId' } },
+			ttl: 'expiresAt',
+		}),
+	);
 
 	// ── WebSocket API — all routes point at the Blocks handler Lambda ──────
 	const wsApi = new WebSocketApi(stack, 'BlocksRtWebSocket', {

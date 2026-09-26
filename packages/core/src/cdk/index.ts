@@ -42,6 +42,18 @@ export {
 export { blocksNodejsBundling } from './bundling.js';
 export { finalizeConfigRegistry, getConfigLocation, registerConfig } from './config-registry.js';
 export { finalizeDashboards, registerDashboardFinalizer } from './dashboard-registry.js';
+export {
+	bindComputeIdentityProvider,
+	getComputeIdentityProvider,
+	getIdentityPoolGuestRole,
+	getIdentityPoolRole,
+	grantComputeIdentityAccess,
+	markSystemIdentityScope,
+	registerIdentityPoolGuestRole,
+	registerIdentityPoolRole,
+	withSystemIdentityScope,
+} from './identity-registry.js';
+export { interpolateIdentityKeyPatternForIam } from '../common/identity-access.js';
 export { SandboxDisableDeletionProtection } from './mixins.js';
 export { DEFAULT_NODE_RUNTIME } from './node-version.js';
 export { synthGuard } from './synth-guard.js';
@@ -228,11 +240,23 @@ export class Scope extends Construct {
 	 */
 	_compute?: Compute;
 
+	/** Whether this private framework scope intentionally retains system identity. */
+	systemIdentity = false;
+
 	constructor(id: string, options?: ScopeOptions) {
 		const parent = options?.parent || (globalThis as any).CURRENT_BLOCKS_STACK;
 		super(parent, id);
 		this.id = id;
 		this.parent = parent;
+		if (options?.compute) {
+			const compute = options.compute as unknown;
+			if (!(compute instanceof Construct) || typeof (compute as Partial<Compute>).setEnv !== 'function') {
+				throw new Error('ScopeOptions.compute must be a Compute when constructing CDK infrastructure.');
+			}
+			this._compute = compute as Compute;
+		}
+		this.systemIdentity =
+			options?.systemIdentity === true || (parent as { systemIdentity?: boolean }).systemIdentity === true;
 		this.root = this.resolveRoot();
 	}
 
@@ -273,9 +297,9 @@ export class Scope extends Construct {
 	 * block or an ancestor scope, else the owning stack/backend's default compute.
 	 *
 	 * For any app that doesn't assign a compute, this always resolves to the
-	 * default — so reads are a no-op refactor. `_compute` is internal
-	 * (test/framework) until the customer-facing surface exists; there is no
-	 * public option to set it yet.
+	 * default — so reads are a no-op refactor. `_compute` remains an internal
+	 * test/framework field. Applications select a compute through the public
+	 * `ScopeOptions.compute` option or by parenting scopes under a compute.
 	 */
 	get compute(): Compute {
 		for (let current: ScopeParent | undefined = this; current; current = (current as Scope).parent) {

@@ -28,7 +28,15 @@ import * as cdk from 'aws-cdk-lib';
 import type { Construct } from 'constructs';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as s3vectors from 'aws-cdk-lib/aws-s3vectors';
-import { Scope, DEFAULT_NODE_RUNTIME, finalizeConfigRegistry, BlocksPresets, type BlocksDefaults } from '@aws-blocks/core/cdk';
+import {
+  Scope,
+  DEFAULT_NODE_RUNTIME,
+  finalizeConfigRegistry,
+  BlocksPresets,
+  registerIdentityPoolGuestRole,
+  registerIdentityPoolRole,
+  type BlocksDefaults,
+} from '@aws-blocks/core/cdk';
 import { KnowledgeBase } from './index.cdk.js';
 
 // Real local-folder source so BucketDeployment + sidecar generation synth.
@@ -300,6 +308,77 @@ test('CDK: calling a runtime method throws an actionable synth-time error (not a
       () => construct[method]('x'),
       /cannot be called during CDK synth/,
       `${method}() should throw the actionable synth-time error`,
+    );
+  }
+});
+
+test('CDK: identity-bound KnowledgeBase grants only declared Bedrock operations to identity roles', () => {
+  const app = new cdk.App();
+  const stack = new StubBlocksStack(app, 'identitykb');
+  const poolFullId = 'app/identities';
+  const guestRole = new cdk.aws_iam.Role(stack, 'GuestRole', {
+    roleName: 'KnowledgeBaseGuestRole',
+    assumedBy: new cdk.aws_iam.WebIdentityPrincipal('cognito-identity.amazonaws.com'),
+  });
+  const authenticatedRole = new cdk.aws_iam.Role(stack, 'AuthenticatedRole', {
+    roleName: 'KnowledgeBaseAuthenticatedRole',
+    assumedBy: new cdk.aws_iam.WebIdentityPrincipal('cognito-identity.amazonaws.com'),
+  });
+  registerIdentityPoolGuestRole(stack, poolFullId, guestRole);
+  registerIdentityPoolRole(stack, poolFullId, authenticatedRole);
+  const scope = new Scope('app');
+  // Compute assignment is framework plumbing, not customer code. The isolated
+  // CDK fixture supplies the minimal identity-bound Compute shape so grants
+  // resolve through the same lookup as a real LambdaCompute.
+  (scope as unknown as { _compute: { identityProviderFullId: string; bindIdentityProvider(provider: string): void } })._compute = {
+    identityProviderFullId: poolFullId,
+    bindIdentityProvider() {},
+  };
+  new KnowledgeBase(scope, 'docs', {
+    source: FIXTURES,
+    identityAccess: [
+      { access: 'guest', operations: ['retrieve'] },
+      { access: 'authenticated', operations: ['isSynced'] },
+    ],
+  });
+
+  const template = Template.fromStack(stack).toJSON();
+  const policyBindings = Object.entries(template.Resources).flatMap(([logicalId, resource]) => {
+    if (typeof resource !== 'object' || resource === null) return [];
+    const typed = resource as {
+      Type?: string;
+      Properties?: { Roles?: unknown; RoleName?: unknown; PolicyDocument?: { Statement?: unknown[] }; Policies?: unknown[] };
+    };
+    if (typed.Type === 'AWS::IAM::Policy') {
+      return [{ owner: JSON.stringify(typed.Properties?.Roles), statements: typed.Properties?.PolicyDocument?.Statement ?? [] }];
+    }
+    if (typed.Type === 'AWS::IAM::Role') {
+      return (typed.Properties?.Policies ?? []).flatMap(policy => {
+        const document = (policy as { PolicyDocument?: { Statement?: unknown[] } }).PolicyDocument;
+        return document ? [{ owner: JSON.stringify(typed.Properties?.RoleName ?? logicalId), statements: document.Statement ?? [] }] : [];
+      });
+    }
+    return [];
+  });
+  const actionsFor = (roleName: string): string[] => policyBindings
+    .filter(policy => policy.owner.includes(roleName))
+    .flatMap(policy => policy.statements)
+    .flatMap(statement => {
+      const action = (statement as { Action?: string | string[] }).Action;
+      return Array.isArray(action) ? action : action ? [action] : [];
+    });
+
+  const roleId = (role: cdk.aws_iam.Role) => stack.getLogicalId(role.node.defaultChild as cdk.CfnResource);
+  assert.deepStrictEqual(actionsFor(roleId(guestRole)), ['bedrock:Retrieve']);
+  assert.deepStrictEqual(actionsFor(roleId(authenticatedRole)).sort(), [
+    'bedrock:GetIngestionJob',
+    'bedrock:ListIngestionJobs',
+  ]);
+  assert.deepStrictEqual(actionsFor(roleId(stack.executionRole as cdk.aws_iam.Role)).filter(action => action.startsWith('bedrock:')), []);
+  for (const role of [guestRole, authenticatedRole]) {
+    assert.ok(
+      actionsFor(roleId(role)).every(action => !action.startsWith('s3:') && !action.startsWith('s3vectors:')),
+      'identity callers may query Bedrock but must not receive document or vector-store access',
     );
   }
 });

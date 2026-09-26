@@ -25,6 +25,15 @@ Background job processing backed by SQS and Lambda.
 - **`getStatus(jobId)`** - Read a job's recorded state and full transition history (returns `AsyncJobStatus | null`). Requires `trackStatus: true`.
 - **`waitUntilComplete(jobId, options?)`** - Wait until the job reaches `complete` or `failed` (returns the final `AsyncJobStatus`). Requires `trackStatus: true`.
 
+### Compute identity boundary
+
+AsyncJob does not forward request identity through SQS payloads. An identity-bound
+request may enqueue a job only through its own explicitly authorized application
+code; the later job handler has no caller identity and must fail closed if it
+uses identity-protected data. With `trackStatus: true`, AsyncJob's private
+transition table is framework metadata and uses system access only for queued,
+processing, complete, and failed bookkeeping.
+
 ## Quick Start
 
 ```typescript
@@ -198,5 +207,4 @@ handler: async (payload, ctx) => {
 ```
 
 **Check the dead-letter queue:** Jobs that fail after `maxRetries` attempts land in the DLQ. In AWS, check the `{scope}-{id}-dlq` queue in the SQS console. In local dev, failed jobs are logged to the console with their full payload.
-
 

@@ -1,44 +1,46 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-	BedrockAgentRuntimeClient,
-	RetrieveCommand,
-	type RetrievalFilter,
-	type KnowledgeBaseRetrievalResult,
-} from '@aws-sdk/client-bedrock-agent-runtime';
+import type { ChildLogger } from '@aws-blocks/bb-logger';
+import { Logger } from '@aws-blocks/bb-logger';
+import type { ScopeParent } from '@aws-blocks/core';
+import { getSdkIdentifiers, registerSdkIdentifiers, Scope } from '@aws-blocks/core';
+import { captureRequestIdentity, withRequestAwsClient } from '@aws-blocks/core/bb-utils';
 import {
 	BedrockAgentClient,
-	ListIngestionJobsCommand,
 	GetIngestionJobCommand,
 	type IngestionJobSummary,
+	ListIngestionJobsCommand,
 } from '@aws-sdk/client-bedrock-agent';
-import { Scope, registerSdkIdentifiers, getSdkIdentifiers } from '@aws-blocks/core';
-import type { ScopeParent } from '@aws-blocks/core';
-import type {
-	KnowledgeBaseOptions,
-	RetrieveOptions,
-	RetrieveResult,
-	MetadataFilter,
-	WaitUntilSyncedOptions,
-} from './types.js';
+import {
+	BedrockAgentRuntimeClient,
+	type KnowledgeBaseRetrievalResult,
+	type RetrievalFilter,
+	RetrieveCommand,
+} from '@aws-sdk/client-bedrock-agent-runtime';
 import { blocksError, KnowledgeBaseErrors } from './errors.js';
 import { normalizeMaxResults } from './normalize.js';
-import { BB_NAME, BB_VERSION } from './version.js';
-import { Logger } from '@aws-blocks/bb-logger';
-import type { ChildLogger } from '@aws-blocks/bb-logger';
-
-export type {
+import type {
 	KnowledgeBaseOptions,
-	SourceConfig,
-	ChunkingConfig,
-	ChunkingStrategy,
+	MetadataFilter,
 	RetrieveOptions,
 	RetrieveResult,
-	MetadataFilter,
 	WaitUntilSyncedOptions,
 } from './types.js';
+import { BB_NAME, BB_VERSION } from './version.js';
+
 export { KnowledgeBaseErrors } from './errors.js';
+export type {
+	ChunkingConfig,
+	ChunkingStrategy,
+	KnowledgeBaseOperation,
+	KnowledgeBaseOptions,
+	MetadataFilter,
+	RetrieveOptions,
+	RetrieveResult,
+	SourceConfig,
+	WaitUntilSyncedOptions,
+} from './types.js';
 
 // ── Env var sanitization ───────────────────────────────────────────────────
 
@@ -302,31 +304,33 @@ export class KnowledgeBase extends Scope {
 		const filter = buildFilter(options?.filter);
 		const knowledgeBaseId = this.ensureKbId();
 
-		try {
-			const response = await this.runtimeClient.send(
-				new RetrieveCommand({
-					knowledgeBaseId,
-					retrievalQuery: { text: query },
-					retrievalConfiguration: {
-						vectorSearchConfiguration: {
-							numberOfResults: maxResults,
-							...(filter ? { filter } : {}),
+		return this.withRuntimeClient(async (runtimeClient) => {
+			try {
+				const response = await runtimeClient.send(
+					new RetrieveCommand({
+						knowledgeBaseId,
+						retrievalQuery: { text: query },
+						retrievalConfiguration: {
+							vectorSearchConfiguration: {
+								numberOfResults: maxResults,
+								...(filter ? { filter } : {}),
+							},
 						},
-					},
-				}),
-			);
+					}),
+				);
 
-			const results: RetrieveResult[] = [];
-			for (const item of response.retrievalResults ?? []) {
-				results.push(mapResultItem(item));
+				const results: RetrieveResult[] = [];
+				for (const item of response.retrievalResults ?? []) {
+					results.push(mapResultItem(item));
+				}
+
+				return results;
+			} catch (err) {
+				const mapped = mapSdkError(err);
+				this.log.error(mapped.message);
+				throw mapped;
 			}
-
-			return results;
-		} catch (err) {
-			const mapped = mapSdkError(err);
-			this.log.error(mapped.message);
-			throw mapped;
-		}
+		});
 	}
 
 	/**
@@ -387,18 +391,37 @@ export class KnowledgeBase extends Scope {
 	 * ```
 	 */
 	async isSynced(): Promise<boolean> {
+		const assertRequestIdentity = captureRequestIdentity(this);
+		return this.withAgentClient((agentClient) => this.isSyncedWithClient(agentClient, assertRequestIdentity));
+	}
+
+	private async isSyncedWithClient(
+		agentClient: BedrockAgentClient,
+		assertRequestIdentity: () => void,
+	): Promise<boolean> {
 		const knowledgeBaseId = this.ensureKbId();
 		const dataSourceId = this.getDataSourceId();
 		// No BB-managed ingestion to track → nothing to wait for.
 		if (!dataSourceId) return true;
 
-		const job = await this.fetchLatestIngestionJob(knowledgeBaseId, dataSourceId);
+		const job = await this.fetchLatestIngestionJob(
+			agentClient,
+			knowledgeBaseId,
+			dataSourceId,
+			assertRequestIdentity,
+		);
 		// No ingestion job recorded yet → ingestion has not started; not synced yet.
 		if (!job) return false;
 
 		if (job.status === 'COMPLETE') return true;
 		if (job.status === 'FAILED') {
-			const reasons = await this.fetchFailureReasons(knowledgeBaseId, dataSourceId, job.ingestionJobId);
+			const reasons = await this.fetchFailureReasons(
+				agentClient,
+				knowledgeBaseId,
+				dataSourceId,
+				job.ingestionJobId,
+				assertRequestIdentity,
+			);
 			throw blocksError(
 				KnowledgeBaseErrors.IngestionFailed,
 				`Knowledge base ingestion failed.${reasons.length ? ` Reasons: ${reasons.join('; ')}` : ''}`,
@@ -468,6 +491,7 @@ export class KnowledgeBase extends Scope {
 	 * ```
 	 */
 	async waitUntilSynced(options?: WaitUntilSyncedOptions): Promise<void> {
+		const assertRequestIdentity = captureRequestIdentity(this);
 		const timeoutMs = Math.max(options?.timeoutMs ?? 300_000, 0);
 		const pollIntervalMs = Math.max(options?.pollIntervalMs ?? 5_000, 1);
 		const maxConsecutiveTransientErrors = Math.max(options?.maxConsecutiveTransientErrors ?? 3, 0);
@@ -477,6 +501,7 @@ export class KnowledgeBase extends Scope {
 		let consecutiveTransientErrors = 0;
 		let lastTransient: Error | undefined;
 		for (;;) {
+			assertRequestIdentity();
 			// Cancellation: bail out before doing any work on each iteration. An
 			// already-aborted signal throws here on the very first pass (no poll).
 			signal?.throwIfAborted();
@@ -485,7 +510,12 @@ export class KnowledgeBase extends Scope {
 				// IngestionFailedException on a FAILED job, NotReady when the KB is
 				// not deployed (or briefly not-yet-visible), or RetrievalFailedException
 				// for transient blips.
-				if (await this.isSynced()) return;
+				if (
+					await this.withAgentClient((agentClient) =>
+						this.isSyncedWithClient(agentClient, assertRequestIdentity),
+					)
+				)
+					return;
 				// A clean poll clears any transient-error streak — reset the remembered
 				// error alongside the counter so a later Timeout can only ever fold in a
 				// transient from the streak still in flight at the deadline, never a stale
@@ -554,17 +584,50 @@ export class KnowledgeBase extends Scope {
 		return this.agentClient;
 	}
 
+	private async withRuntimeClient<R>(callback: (client: BedrockAgentRuntimeClient) => Promise<R>): Promise<R> {
+		return withRequestAwsClient(
+			this,
+			this.runtimeClient,
+			(credentials) =>
+				new BedrockAgentRuntimeClient({
+					maxAttempts: 3,
+					retryMode: 'adaptive',
+					customUserAgent: this.buildUserAgentChain(),
+					credentials,
+				}),
+			callback,
+		);
+	}
+
+	private async withAgentClient<R>(callback: (client: BedrockAgentClient) => Promise<R>): Promise<R> {
+		return withRequestAwsClient(
+			this,
+			this.getAgentClient(),
+			(credentials) =>
+				new BedrockAgentClient({
+					maxAttempts: 3,
+					retryMode: 'adaptive',
+					customUserAgent: this.buildUserAgentChain(),
+					credentials,
+				}),
+			callback,
+		);
+	}
+
 	/**
 	 * List the data source's ingestion jobs (most recent first) and return the
 	 * latest summary, or `undefined` when none exist yet. SDK errors are mapped
 	 * to Blocks error constants via {@link mapSdkError}.
 	 */
 	private async fetchLatestIngestionJob(
+		agentClient: BedrockAgentClient,
 		knowledgeBaseId: string,
 		dataSourceId: string,
+		assertRequestIdentity: () => void,
 	): Promise<IngestionJobSummary | undefined> {
+		assertRequestIdentity();
 		try {
-			const response = await this.getAgentClient().send(
+			const response = await agentClient.send(
 				new ListIngestionJobsCommand({
 					knowledgeBaseId,
 					dataSourceId,
@@ -594,13 +657,16 @@ export class KnowledgeBase extends Scope {
 	 * missing or the lookup fails — the caller still reports the failure.
 	 */
 	private async fetchFailureReasons(
+		agentClient: BedrockAgentClient,
 		knowledgeBaseId: string,
 		dataSourceId: string,
 		ingestionJobId: string | undefined,
+		assertRequestIdentity: () => void,
 	): Promise<string[]> {
 		if (!ingestionJobId) return [];
+		assertRequestIdentity();
 		try {
-			const response = await this.getAgentClient().send(
+			const response = await agentClient.send(
 				new GetIngestionJobCommand({ knowledgeBaseId, dataSourceId, ingestionJobId }),
 			);
 			const reasons = response.ingestionJob?.failureReasons ?? [];

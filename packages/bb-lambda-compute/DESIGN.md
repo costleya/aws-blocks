@@ -70,6 +70,24 @@ Public surface (CDK layer):
 | `logGroup` | `LogGroup` | The function's CloudWatch log group (retention from `defaults.logRetention`). |
 | `setEnv(key, value)` | `void` | Inject a runtime env var onto the function — the `Compute` contract the framework calls instead of `handler.addEnvironment` directly. |
 
+### Identity-scoped request dispatch
+
+`LambdaComputeProps.identityPool` optionally associates a structural Identity
+Pool reference with this individual compute. The reference needs only the
+provider's `fullId`; the CDK layer binds that identifier through core and does
+not import or depend on the concrete Identity Pool Building Block. Core uses the
+association when it dispatches namespaces and raw routes to the compute. A
+request with a valid authenticated provider identity runs inside the provider
+callback before application code executes. When the provider supports guests, a
+request with no supplied login runs in its guest identity scope. An invalid
+supplied login is rejected rather than falling back to guest credentials.
+Leaving the option unset preserves the existing Lambda execution-role path.
+
+The runtime and mock handles retain the selected provider `fullId` as metadata
+so declarations made from the shared backend module have the same identity
+association in every conditional-export layer. They still provision no
+infrastructure.
+
 `fn` and `apiGateway` exist only on the CDK layer (they are `aws-cdk-lib`
 constructs); `setEnv` is part of the `Compute` contract present in every layer
 (a no-op in the non-CDK layers — see below).

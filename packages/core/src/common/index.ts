@@ -6,10 +6,15 @@ import type { Construct } from 'constructs';
 import type { BlocksDefaults } from '../cdk/blocks-defaults.js';
 import { CORE_VERSION } from '../version.js';
 import { OFFICIAL_BB_NAMES } from './official-bb-names.generated.js';
+import type { IdentityComputeHandle } from './identity-context.js';
 export { OFFICIAL_BB_NAMES } from './official-bb-names.generated.js';
 
 export interface ScopeOptions {
   parent?: ScopeParent;
+  /** Runtime compute association inherited by descendant scopes. */
+  compute?: IdentityComputeHandle;
+  /** Keep this private framework scope on system identity. */
+  systemIdentity?: boolean;
   bbName?: string;
   bbVersion?: string;
 }
@@ -134,6 +139,10 @@ export interface BuildingBlockMeta {
 export class Scope {
   public readonly id: string;
   public readonly parent: ScopeParent;
+  /** The nearest runtime compute association, when this scope is compute-bound. */
+  public readonly compute?: IdentityComputeHandle;
+  /** Whether this scope intentionally retains system identity. */
+  public systemIdentity: boolean;
 
   /** Short BB name used in user-agent strings. Set by subclass BBs. */
   readonly bbName?: string;
@@ -148,6 +157,8 @@ export class Scope {
     this.parent = options?.parent || (globalThis as any).CURRENT_BLOCKS_STACK || {
       id: typeof process !== 'undefined' ? process.env?.BLOCKS_STACK_NAME : undefined
     };
+    this.compute = options?.compute || (this.parent as { compute?: IdentityComputeHandle }).compute;
+    this.systemIdentity = options?.systemIdentity === true || (this.parent as { systemIdentity?: boolean }).systemIdentity === true;
 
     if (options?.bbName) {
       this.bbName = options.bbName;

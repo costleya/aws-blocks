@@ -23,8 +23,7 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as iam from 'aws-cdk-lib/aws-iam';
 
-import { BuildingBlockScope } from '@aws-blocks/core/cdk';
-import { registerConfig } from '@aws-blocks/core/cdk';
+import { BuildingBlockScope, registerConfig, withSystemIdentityScope } from '@aws-blocks/core/cdk';
 import type { ScopeParent } from '@aws-blocks/core';
 import { KVStore } from '@aws-blocks/bb-kv-store';
 import { AppSetting } from '@aws-blocks/bb-app-setting';
@@ -288,7 +287,10 @@ export class AuthCognito<const O extends AuthCognitoOptions = AuthCognitoOptions
 		// session records — which hold live Cognito refresh tokens — expire with
 		// the session instead of accumulating forever; the runtime stamps each
 		// write with `now + sessionTtlSeconds`.
-		this.sessions = new KVStore(this, 'sessions', { removalPolicy: opts.removalPolicy, ttl: true });
+		this.sessions = withSystemIdentityScope(
+			this,
+			() => new KVStore(this, 'sessions', { removalPolicy: opts.removalPolicy, ttl: true }),
+		);
 
 		// 6. Env vars + IAM
 		registerConfig(this, env.USER_POOL_ID, this.userPool.userPoolId);
@@ -527,4 +529,3 @@ function mapAutoVerify(aliases: cognito.SignInAliases): cognito.AutoVerifiedAttr
 		...(aliases.phone ? { phone: true } : {}),
 	};
 }
-

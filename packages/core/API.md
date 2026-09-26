@@ -55,10 +55,19 @@ export type BlocksContext = {
         status: number;
         send: (body: any) => void;
     };
+    identity?: BlocksRequestIdentity;
 };
 
 // @public
 export function blocksError(name: string, message: string): Error;
+
+// @public
+export interface BlocksRequestIdentity {
+    // (undocumented)
+    readonly authenticated: boolean;
+    // (undocumented)
+    readonly identityId: string;
+}
 
 // @public
 export interface BuildingBlockMeta {
@@ -157,6 +166,8 @@ export interface RawRouteOptions {
 export interface RegisteredRoute {
     // (undocumented)
     handler: (context: BlocksContext) => Promise<void>;
+    // @internal
+    identityProviderFullId?: string;
     // (undocumented)
     method: string;
     paramNames: string[];
@@ -167,6 +178,7 @@ export interface RegisteredRoute {
 // @public
 export function registerRoute(options: RawRouteOptions & {
     path: string;
+    identityProviderFullId?: string;
 }): void;
 
 // @public
@@ -184,6 +196,8 @@ export class Scope {
     readonly bbName?: string;
     readonly bbVersion?: string;
     protected buildUserAgentChain(): [string, string][];
+    // Warning: (ae-forgotten-export) The symbol "IdentityComputeHandle" needs to be exported by the entry point index.d.ts
+    readonly compute?: IdentityComputeHandle;
     // (undocumented)
     get fullId(): string;
     // @internal
@@ -203,6 +217,7 @@ export class Scope {
     registerDevAttachment(packageSpecifier: string): void;
     registerLambdaEventHandler(eventSource: string, identifier: string, handler: (record: any) => Promise<void>): void;
     static _resetRegistry(): void;
+    systemIdentity: boolean;
 }
 
 // @public (undocumented)
@@ -211,8 +226,10 @@ export interface ScopeOptions {
     bbName?: string;
     // (undocumented)
     bbVersion?: string;
+    compute?: IdentityComputeHandle;
     // (undocumented)
     parent?: ScopeParent;
+    systemIdentity?: boolean;
 }
 
 // @public (undocumented)

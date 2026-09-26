@@ -42,7 +42,7 @@
   "scripts": {
     "prebuild": "node ../../scripts/generate-version.mjs AsyncJob",
     "build": "tsc --build",
-    "test": "node --test --test-force-exit dist/**/*.test.js"
+    "test": "node --test --test-force-exit dist/identity-system.test.js dist/index.aws.test.js dist/index.test.js dist/status.test.js && node --conditions=cdk --test --test-force-exit dist/index.cdk.test.js"
   },
   "dependencies": {
     "@aws-blocks/bb-logger": "^0.2.0",

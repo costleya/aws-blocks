@@ -40,6 +40,14 @@ The `Realtime` instance exposes three methods, all keyed by namespace name (type
 
 **Runtime only.** These methods (`publish`, `subscribe`, `getChannel`) run at request time — call them inside an `ApiNamespace` method, `RawRoute` handler, job handler, or a runtime script, **not** at the top level of your `aws-blocks/index.ts`. Top-level code runs during CDK synth, where the block resolves to its infrastructure construct (no data methods), so a top-level call throws `rt.<method> is not a function` (throws `TypeError` at runtime if called during CDK synth). To publish seed data, do it from inside a handler or a separate runtime script. Constructing the block at module scope is fine; only method calls must move into handlers.
 
+### Compute identity boundary
+
+Realtime does not carry request identity over WebSocket connections. Its private
+connection table stores framework routing metadata and uses system access for
+connect, disconnect, subscribe, and cleanup bookkeeping. Authorize channel
+access in the API method before returning a channel handle; background work and
+WebSocket events must not assume an active caller identity.
+
 ### Channel Handle
 
 `getChannel()` returns a `Promise<RealtimeChannel<T>>` — `await` it to get a subscribe-only handle that serializes via `toJSON()` for client transfer:

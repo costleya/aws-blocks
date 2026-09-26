@@ -60,10 +60,6 @@ let backendPath: string;
 let tmpDir: string;
 
 before(() => {
-	// Not for module resolution (the `.cdk.js` imports use explicit /cdk paths and
-	// are already resolved by now) — this satisfies `assertCdkConditionActive()`,
-	// which `BlocksStack.create()` calls and which reads `process.env.NODE_OPTIONS`.
-	process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ''} --conditions=cdk`;
 	tmpDir = mkdtempSync(join(__dirname, 'tmp-async-cdk-'));
 	handlerPath = join(tmpDir, 'handler.mjs');
 	writeFileSync(handlerPath, "export const handler = async () => ({ statusCode: 200, body: '{}' });\n");
@@ -130,6 +126,18 @@ describe('AsyncJob compute targeting', () => {
 			() => new AsyncJob(scoped, 'jobs', { handler: async () => {}, trackStatus: false }),
 			(e: unknown) => isBlocksError(e, AsyncJobErrors.UnsupportedCompute),
 		);
+	});
+
+	test('identity-bound compute still provisions status bookkeeping with the execution role', async () => {
+		const stack = await makeStack('AsyncSystemStatus');
+		(stack._defaultCompute as LambdaCompute).identityProviderFullId = 'AsyncSystemStatus/pool';
+		new AsyncJob(stack, 'jobs', { handler: async () => {}, trackStatus: true });
+
+		const template = Template.fromStack(stack);
+		template.resourceCountIs('AWS::DynamoDB::Table', 1);
+		const policy = JSON.stringify(template.toJSON());
+		assert.ok(policy.includes('dynamodb:PutItem'), 'status writes stay on the system execution role');
+		assert.ok(policy.includes('BlocksRole'), 'status bookkeeping retains the shared execution role');
 	});
 });
 

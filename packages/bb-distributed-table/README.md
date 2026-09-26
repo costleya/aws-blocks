@@ -46,6 +46,28 @@ const table = new DistributedTable(scope, id, options)
 | `readValidation` | `'off' \| 'coerce' \| 'strict'` | No | How reads (`get`/`getBatch`/`query`/`scan`) reconcile a stored item with `schema`. `'coerce'` (**default**) returns the coerced value and, on failure, the raw value + a warning (never throws); `'strict'` throws `ValidationFailed` on a non-conforming item; `'off'` returns the raw value with no validation. See [Reads and schema evolution](#reads-and-schema-evolution). |
 | `table` | `ExternalTableRef` | No | Wrap an existing DynamoDB table instead of creating one. Durability/encryption options are ignored — the customer owns the table's configuration. |
 | `logger` | `ChildLogger` | No | Optional logger for internal operations. When omitted, a default Logger at error level is created. |
+| `identityAccess` | `readonly IdentityResourceGrant<DistributedTableOperation>[]` | No | Operations granted to authenticated or guest identities bound to this table's compute. See [Identity-scoped access](#identity-scoped-access). |
+
+### Identity-scoped access
+
+Bind an IdentityPool to the compute for grant synthesis, then use `identityAccess` to grant its roles only the table operations they need. An API method calls `await identityPool.assumeForIdentity(context)` before user-scoped table operations. Each grant names the role (`'authenticated'` or `'guest'`), the public table operations, and optional partition-key patterns. `${identityId}` is replaced by the request identity and `*` is the only wildcard.
+
+```typescript
+const orders = new DistributedTable(scope, 'orders', {
+  schema: orderSchema,
+  key: { partitionKey: 'ownerId', sortKey: 'orderId' },
+  indexes: { byOwner: { partitionKey: 'ownerId', sortKey: 'createdAt' } },
+  identityAccess: [
+    { access: 'authenticated', operations: ['get', 'put', 'delete', 'getBatch', 'putBatch', 'deleteBatch'], keyPatterns: ['${identityId}'] },
+    { access: 'authenticated', operations: ['query'], keyPatterns: ['${identityId}'] },
+    { access: 'guest', operations: ['scan'] },
+  ],
+});
+```
+
+The operation vocabulary is `get`, `put`, `delete`, `query`, `scan`, `getBatch`, `putBatch`, and `deleteBatch`. This table has no `update` or transaction API to grant. Direct and batch methods match patterns against the table primary partition-key value. `query()` matches the selected table or GSI partition-key value, so a key pattern must fit the actual index key selected by the query. A key pattern does not filter items returned from a query.
+
+`scan()` has no partition key. It can be granted only without `keyPatterns`; a scan grant with key patterns is rejected during CDK synthesis and denied by local mock enforcement. After explicit assumption, the mock checks grants locally and AWS relies on the synthesized IAM policy, including `dynamodb:LeadingKeys` for patterned access. A failed or expired assumption fails closed. Calls without an assumption use the ordinary handler client, even on a bound compute.
 
 ### Key Object Pattern
 
@@ -382,6 +404,3 @@ const events = new DistributedTable(scope, 'events', {
 ## Local Development
 
 Mock data persists to disk at `.bb-data/{fullId}/` across dev server restarts. Wipe with `rm -rf .bb-data`. The mock validates the 400 KB item size limit, schema validation, and conditional check failures, matching AWS behavior. Index queries are implemented via in-memory filtering — correctness is preserved but performance characteristics differ from DynamoDB.
-
-
-

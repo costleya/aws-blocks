@@ -153,6 +153,16 @@ Durability posture is resolved from the stack-wide `BlocksDefaults` (`BlocksPres
 
 **`fromExisting` is untouched.** When binding to a pre-existing table these options don't apply — the customer owns that table's durability/encryption configuration, exactly as they own its GSIs.
 
+### D-DT-12: Identity-scoped operations use actual DynamoDB partition keys
+
+`identityAccess` is an optional, typed list of `IdentityResourceGrant<DistributedTableOperation>` declarations. Its vocabulary exactly matches this BB's public methods: `get`, `put`, `delete`, `query`, `scan`, `getBatch`, `putBatch`, and `deleteBatch`. The declaration is independent of `IdentityPool`: the compute selects its identity provider, and the table grants only the declared operations to that provider's authenticated or guest role.
+
+After `assumeForIdentity(context)`, the mock checks a matching declaration before every method. `get`/`delete` and their batch forms match the base-table partition key. `put` and `putBatch` match the base-table partition key from each item. `query` matches the requested primary-table or GSI partition key. This matters for an index with a different key: a pattern that matches `ownerId` does not authorize a query whose actual GSI partition key is `status`. The AWS layer creates a fresh DocumentClient from the active request's fixed Cognito credentials and relies on IAM for operation and key enforcement. Without an assumption, it uses the ordinary Lambda-role client; a failed or expired assumption cannot fall back to that client.
+
+CDK maps each declared operation to its DynamoDB action. Key-pattern declarations use `ForAllValues:StringLike` on `dynamodb:LeadingKeys`, with `Null: false`; query policies include both the table and index ARNs, letting DynamoDB evaluate the actual partition key for the accessed resource. `scan` has no leading key, so it is valid only with an unscoped grant (no `keyPatterns`). The CDK layer rejects a restricted scan grant at synth time; local enforcement likewise cannot satisfy a key-pattern grant without a key. The GSI-management provider remains a framework system operation and retains its separate infrastructure permissions.
+
+For an unbound compute, the ordinary execution-role table grant is retained. For an identity-bound compute, the execution role receives no application-data table grant: absence of an `identityAccess` declaration is fail-closed.
+
 ## Infrastructure (CDK)
 
 Creates a single DynamoDB table:
@@ -164,7 +174,7 @@ Creates a single DynamoDB table:
 - **Billing mode:** PAY_PER_REQUEST
 - **Table name:** Derived from `scope.fullId` (includes stack name for uniqueness)
 - **Durability & encryption:** Secure-by-default in production — PITR, deletion protection, SSE-KMS, and `RemovalPolicy.RETAIN` (see D-DT-11)
-- **Permissions:** `grantReadWriteData` to the parent scope's handler automatically, plus explicit `dynamodb:Query` on `index/*`
+- **Permissions:** unbound computes receive `grantReadWriteData` plus `dynamodb:Query` on `index/*`; identity-bound computes receive only the declared identity-role grants
 
 Attribute types are inferred from the schema at synth time. The CDK layer probes the schema's `StandardSchemaV1.validate()` method with a test value of `0` for each key field — if the field accepts it without issues, it's numeric (`AttributeType.NUMBER`), otherwise string (`AttributeType.STRING`). This is schema-library-agnostic and uses only the standard validation interface.
 
@@ -244,7 +254,7 @@ Items are stored as DynamoDB JSON (marshalled via `@aws-sdk/lib-dynamodb` Docume
 | Batch retry exhaustion (`BatchIncomplete`) is AWS-runtime only | Under sustained throttling, AWS batch ops retry with backoff and throw `DistributedTableErrors.BatchIncomplete` once `MAX_BATCH_ATTEMPTS` is reached; the mock never throttles so this path is unreachable locally | Error name and message are single-sourced in `errors.ts` so catch-site handling (`isBlocksError(e, DistributedTableErrors.BatchIncomplete)`) is identical regardless of backend. Exercise throttling/backoff behavior in sandbox |
 | No item size limit enforcement beyond 400 KB check | Edge cases around DynamoDB marshalling overhead | Mock validates serialized JSON size, which is a close approximation |
 | Immediate consistency (vs eventual for GSIs) | GSI reads always reflect the latest write locally | No mitigation — eventual consistency is inherently non-deterministic. Document the gap; recommend sandbox testing |
-| No IAM enforcement | Permission errors only surface in AWS | No mitigation at mock level — IAM is handled by CDK grants automatically |
+| IAM policy evaluation | The mock enforces declared identity operations and key patterns, but does not emulate IAM's complete policy language | Validate the synthesized policy and run sandbox tests for IAM-specific behavior |
 | In-memory index queries vs DynamoDB index reads | Index query performance characteristics differ; no GSI throughput throttling | No mitigation — correctness is preserved. Performance testing requires sandbox |
 | TTL not enforced locally | Items with expired TTL remain in mock data | Document the gap; test TTL behavior in sandbox |
 | Durability/encryption options (`pointInTimeRecovery`, `protection`, `encryption`) are CDK-only | These provisioning-time settings have no observable effect on mock reads/writes | No mitigation needed — they're infrastructure config, not data behavior; verify the synthesized template in sandbox/prod |

@@ -171,6 +171,7 @@ If resolution fails, fall back to `node_modules/@aws-blocks/blocks/docs`. That f
 | bb-distributed-table | Structured data storage backed by DynamoDB with secondary indexes and rich query capabilities. | — |
 | bb-email-client | Transactional email sending via Amazon SES. | — |
 | bb-file-bucket | File storage backed by Amazon S3. | — |
+| bb-identity-pool | `@aws-blocks/bb-identity-pool` lets an API method explicitly select a Cognito Identity with `await identityPool.assumeForIdentity(context)`. | — |
 | bb-knowledge-base | Semantic document retrieval backed by Amazon Bedrock Knowledge Bases. | — |
 | bb-kv-store | Simple key-value storage backed by DynamoDB. | — |
 | bb-logger | Structured logging with consistent JSON format, log levels, and contextual metadata. | — |

@@ -7,6 +7,7 @@
  */
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import type { ChildLogger } from '@aws-blocks/bb-logger';
+import type { IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 
 // ── Read validation ─────────────────────────────────────────────────────────
 
@@ -20,6 +21,17 @@ import type { ChildLogger } from '@aws-blocks/bb-logger';
  * - `'off'`: return the raw stored value with no validation.
  */
 export type ReadValidationMode = 'off' | 'coerce' | 'strict';
+
+/** Operations that can receive an explicit identity access grant. */
+export type DistributedTableOperation =
+	| 'get'
+	| 'put'
+	| 'delete'
+	| 'query'
+	| 'scan'
+	| 'getBatch'
+	| 'putBatch'
+	| 'deleteBatch';
 
 // ── Key configuration ───────────────────────────────────────────────────────
 
@@ -176,6 +188,14 @@ export interface DistributedTableOptions<
 	table?: ExternalTableRef;
 	/** Optional logger for internal operations. When omitted, a default Logger at error level is created. */
 	logger?: ChildLogger;
+	/**
+	 * Explicit operations the identity roles bound to this table's compute may
+	 * perform. Each key pattern applies to the actual DynamoDB partition key:
+	 * the table primary key for direct and batch operations, or the selected
+	 * index partition key for a query. Omit `keyPatterns` to grant the listed
+	 * operation across the table; `scan` cannot use key patterns.
+	 */
+	identityAccess?: readonly IdentityResourceGrant<DistributedTableOperation>[];
 }
 
 export interface ExternalTableRef {
@@ -298,5 +318,4 @@ export type DeleteOptions<T> =
 	| { ifExists: true; ifFieldEquals?: never }
 	| { ifExists?: never; ifFieldEquals: Partial<T> }
 	| Record<string, never>;
-
 

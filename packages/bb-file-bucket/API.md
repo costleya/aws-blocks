@@ -5,6 +5,7 @@
 ```ts
 
 import type { ChildLogger } from '@aws-blocks/bb-logger';
+import type { IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 import { Scope } from '@aws-blocks/core';
 import type { ScopeParent } from '@aws-blocks/core';
 
@@ -74,11 +75,15 @@ export const FileBucketErrors: {
     readonly FileTooLarge: "EntityTooLarge";
 };
 
+// @public
+export type FileBucketOperation = 'put' | 'get' | 'delete' | 'deleteBatch' | 'getUrl' | 'putUrl' | 'getFileHandle' | 'createUploadHandle' | 'scan' | 'listVersions' | 'restoreVersion';
+
 // @public (undocumented)
 export interface FileBucketOptions {
     accessLogging?: boolean;
     bucket?: ExternalBucketRef;
     corsRules?: CorsRule[];
+    identityAccess?: readonly IdentityResourceGrant<FileBucketOperation>[];
     lifecycleRules?: LifecycleRule[];
     logger?: ChildLogger;
     noncurrentVersionExpirationDays?: number;

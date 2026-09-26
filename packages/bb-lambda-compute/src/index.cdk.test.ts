@@ -14,7 +14,14 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { type BlocksDefaults, BlocksPresets, Scope } from '@aws-blocks/core/cdk';
+import type { BlocksContext } from '@aws-blocks/core';
+import {
+	type BlocksDefaults,
+	BlocksPresets,
+	registerIdentityPoolGuestRole,
+	registerIdentityPoolRole,
+	Scope,
+} from '@aws-blocks/core/cdk';
 import { Compute } from '@aws-blocks/core/cdk/internal';
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
@@ -72,7 +79,57 @@ function setup(stackId: string, defaults?: BlocksDefaults): { stack: StubBlocksS
 	return { stack, parent };
 }
 
+function identityProvider(fullId: string) {
+	return {
+		fullId,
+		async run<T>(_context: BlocksContext, callback: () => Promise<T>): Promise<T> {
+			return callback();
+		},
+	};
+}
+
 describe('LambdaCompute', () => {
+	test('leaves the default compute unbound when no identity provider is supplied', () => {
+		const { parent } = setup('LambdaComputeNoIdentity');
+		const compute = new LambdaCompute(parent, 'extra');
+		assert.strictEqual(compute.identityProviderFullId, undefined);
+	});
+
+	test('binds a registered identity provider to this compute only', () => {
+		const { stack, parent } = setup('LambdaComputeIdentityBinding');
+		const providerFullId = 'app/identities';
+		registerIdentityPoolRole(
+			stack,
+			providerFullId,
+			new cdk.aws_iam.Role(stack, 'IdentityAuthenticatedRole', {
+				assumedBy: new cdk.aws_iam.ServicePrincipal('cognito-identity.amazonaws.com'),
+			}),
+		);
+		const compute = new LambdaCompute(parent, 'identity', { identityPool: identityProvider(providerFullId) });
+		const sibling = new LambdaCompute(parent, 'sibling');
+		assert.strictEqual(compute.identityProviderFullId, providerFullId);
+		assert.strictEqual(sibling.identityProviderFullId, undefined);
+	});
+
+	test('rejects an unknown identity provider and accepts a guest-only provider', () => {
+		const { stack, parent } = setup('LambdaComputeIdentityProviderValidation');
+		assert.throws(
+			() => new LambdaCompute(parent, 'unknown', { identityPool: identityProvider('app/missing-identities') }),
+			/No Identity Pool role is registered/,
+		);
+		const guestProviderFullId = 'app/guest-identities';
+		registerIdentityPoolGuestRole(
+			stack,
+			guestProviderFullId,
+			new cdk.aws_iam.Role(stack, 'IdentityGuestRole', {
+				assumedBy: new cdk.aws_iam.ServicePrincipal('cognito-identity.amazonaws.com'),
+			}),
+		);
+		assert.doesNotThrow(
+			() => new LambdaCompute(parent, 'guest', { identityPool: identityProvider(guestProviderFullId) }),
+		);
+	});
+
 	test('provisions a Lambda function and its own API Gateway', () => {
 		const { stack, parent } = setup('LambdaComputeShape');
 

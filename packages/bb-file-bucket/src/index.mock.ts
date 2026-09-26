@@ -1,37 +1,74 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Scope, registerSdkIdentifiers } from '@aws-blocks/core';
-import { getMockDataDir } from '@aws-blocks/core/bb-utils';
-import type { ScopeParent } from '@aws-blocks/core';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
+import type { ScopeParent } from '@aws-blocks/core';
+import { isBlocksError, registerSdkIdentifiers, Scope } from '@aws-blocks/core';
+import {
+	assertResourceIdentityAccess,
+	getMockDataDir,
+	registerResourceIdentityAccess,
+} from '@aws-blocks/core/bb-utils';
+import { validateBucketName } from './bucket-name.js';
+import { validateIdentityListAccess } from './identity-access.js';
 import { assertContainedPath } from './mock-utils.js';
 import {
-	contentRoot, contentPath, metaPath,
-	versionsDirFor, versionContentPath, versionMetaPath,
-	deleteMarkerPath, isVersionEntry,
+	contentPath,
+	contentRoot,
+	deleteMarkerPath,
+	isVersionEntry,
+	metaPath,
+	versionContentPath,
+	versionMetaPath,
+	versionsDirFor,
 } from './paths.js';
-import { mintFileToken, LOCAL_FILE_SECRET } from './tokens.js';
-import { validateBucketName } from './bucket-name.js';
+import { LOCAL_FILE_SECRET, mintFileToken } from './tokens.js';
 import type {
-	FileBucketOptions, PutOptions, PutUrlOptions, ScanOptions,
-	FileContent, FileInfo, ExternalBucketRef, CorsRule,
-	FileDownloadClient, FileUploadClient, FileVersionInfo,
-	GetOptionsFor, DeleteOptionsFor, GetUrlOptionsFor,
+	CorsRule,
+	DeleteOptionsFor,
+	ExternalBucketRef,
+	FileBucketOperation,
+	FileBucketOptions,
+	FileContent,
+	FileDownloadClient,
+	FileInfo,
+	FileUploadClient,
+	FileVersionInfo,
+	GetOptionsFor,
+	GetUrlOptionsFor,
+	PutOptions,
+	PutUrlOptions,
+	ScanOptions,
 } from './types.js';
 
 export type {
-	FileBucketOptions, PutOptions, GetUrlOptions, PutUrlOptions, ScanOptions,
-	FileContent, FileInfo, CorsRule, LifecycleRule, ExternalBucketRef,
-	FileDownloadClient, FileUploadClient, FileVersionInfo,
-	FileDownloadDescriptor, FileUploadDescriptor,
-	VersionedGetOptions, VersionedDeleteOptions, VersionedGetUrlOptions,
-	GetOptionsFor, DeleteOptionsFor, GetUrlOptionsFor,
+	CorsRule,
+	DeleteOptionsFor,
+	ExternalBucketRef,
+	FileBucketOperation,
+	FileBucketOptions,
+	FileContent,
+	FileDownloadClient,
+	FileDownloadDescriptor,
+	FileInfo,
+	FileUploadClient,
+	FileUploadDescriptor,
+	FileVersionInfo,
+	GetOptionsFor,
+	GetUrlOptions,
+	GetUrlOptionsFor,
+	LifecycleRule,
+	PutOptions,
+	PutUrlOptions,
+	ScanOptions,
+	VersionedDeleteOptions,
+	VersionedGetOptions,
+	VersionedGetUrlOptions,
 } from './types.js';
 
-import { Logger } from '@aws-blocks/bb-logger';
 import type { ChildLogger } from '@aws-blocks/bb-logger';
+import { Logger } from '@aws-blocks/bb-logger';
 import { BB_NAME, BB_VERSION } from './version.js';
 
 export { FileBucketErrors } from './errors.js';
@@ -119,11 +156,11 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 			// cross-origin requests.
 			for (const rule of options?.corsRules ?? []) {
 				if (rule.allowedOrigins.includes('*')) {
-					const mutating = rule.allowedMethods.filter(m => MUTATING_CORS_METHODS.includes(m));
+					const mutating = rule.allowedMethods.filter((m) => MUTATING_CORS_METHODS.includes(m));
 					if (mutating.length > 0) {
 						throw new Error(
 							`FileBucket "${this.fullId}": CORS rule with wildcard origin '*' must not allow mutating method(s) ${mutating.join(', ')}. ` +
-							`Specify explicit allowedOrigins (e.g. 'https://app.example.com') for ${mutating.join(', ')} instead of '*'.`,
+								`Specify explicit allowedOrigins (e.g. 'https://app.example.com') for ${mutating.join(', ')} instead of '*'.`,
 						);
 					}
 				}
@@ -136,7 +173,7 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 				if (!Number.isInteger(days) || days <= 0) {
 					throw new Error(
 						`FileBucket "${this.fullId}": noncurrentVersionExpirationDays must be a positive integer (got ${days}). ` +
-						`Omit it to use the default of ${DEFAULT_NONCURRENT_VERSION_EXPIRATION_DAYS} days.`,
+							`Omit it to use the default of ${DEFAULT_NONCURRENT_VERSION_EXPIRATION_DAYS} days.`,
 					);
 				}
 			}
@@ -144,12 +181,21 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 		this.log = options?.logger ?? new Logger(this, 'logger', { level: 'error' });
 		this.dataDir = getMockDataDir(this);
 		this.versioned = options?.versioned ?? true;
+		for (const grant of options?.identityAccess ?? []) validateIdentityListAccess(grant);
+		registerResourceIdentityAccess<FileBucketOperation>(this, options?.identityAccess ?? []);
 		this.registerClientMiddleware('@aws-blocks/bb-file-bucket/middleware');
 		this.registerDevAttachment('@aws-blocks/bb-file-bucket/file-server');
 		registerSdkIdentifiers(this.fullId, { bucketName: `mock-${this.fullId}` });
 		// Register in global registry so the file-server can delegate PUT to bucket.put()
-		const registry = ((globalThis as any).__BLOCKS_FILE_BUCKET_REGISTRY__ ??= new Map());
-		registry.set(this.fullId, this);
+		const globalRegistry = globalThis as typeof globalThis & {
+			__BLOCKS_FILE_BUCKET_REGISTRY__?: Map<string, { putFromPresignedUrl?: unknown }>;
+		};
+		const registry = globalRegistry.__BLOCKS_FILE_BUCKET_REGISTRY__ ?? new Map();
+		globalRegistry.__BLOCKS_FILE_BUCKET_REGISTRY__ = registry;
+		registry.set(this.fullId, {
+			putFromPresignedUrl: (path: string, body: Buffer, putOptions: PutOptions) =>
+				this.putUnchecked(path, body, putOptions),
+		});
 	}
 
 	/**
@@ -169,6 +215,11 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 * ```
 	 */
 	async put(path: string, body: Buffer | string, options?: PutOptions): Promise<void> {
+		assertResourceIdentityAccess(this, 'put', path);
+		await this.putUnchecked(path, body, options);
+	}
+
+	private async putUnchecked(path: string, body: Buffer | string, options?: PutOptions): Promise<void> {
 		this.validateKey(path);
 		const filePath = contentPath(this.dataDir, path);
 		mkdirSync(dirname(filePath), { recursive: true });
@@ -187,7 +238,9 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 			writeFileSync(versionContentPath(this.dataDir, path, versionId), buf);
 			writeFileSync(versionMetaPath(this.dataDir, path, versionId), JSON.stringify(meta));
 			// Remove any delete marker
-			try { unlinkSync(deleteMarkerPath(this.dataDir, path)); } catch {}
+			try {
+				unlinkSync(deleteMarkerPath(this.dataDir, path));
+			} catch {}
 		}
 
 		this.writeMeta(path, meta);
@@ -210,6 +263,7 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 * ```
 	 */
 	async get(path: string, options?: GetOptionsFor<O>): Promise<FileContent | null> {
+		assertResourceIdentityAccess(this, 'get', path);
 		this.validateKey(path);
 		const versionId = (options as any)?.versionId as string | undefined;
 		if (versionId && this.versioned) {
@@ -252,12 +306,21 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 * ```
 	 */
 	async delete(path: string, options?: DeleteOptionsFor<O>): Promise<void> {
+		assertResourceIdentityAccess(this, 'delete', path);
+		this.deleteUnchecked(path, options);
+	}
+
+	private deleteUnchecked(path: string, options?: DeleteOptionsFor<O>): void {
 		this.validateKey(path);
 		const versionId = (options as any)?.versionId as string | undefined;
 		if (this.versioned && versionId) {
 			// Permanently delete a specific version
-			try { unlinkSync(versionContentPath(this.dataDir, path, versionId)); } catch {}
-			try { unlinkSync(versionMetaPath(this.dataDir, path, versionId)); } catch {}
+			try {
+				unlinkSync(versionContentPath(this.dataDir, path, versionId));
+			} catch {}
+			try {
+				unlinkSync(versionMetaPath(this.dataDir, path, versionId));
+			} catch {}
 			return;
 		}
 		if (this.versioned) {
@@ -267,8 +330,12 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 			writeFileSync(deleteMarkerPath(this.dataDir, path), '');
 			return;
 		}
-		try { unlinkSync(contentPath(this.dataDir, path)); } catch {}
-		try { unlinkSync(metaPath(this.dataDir, path)); } catch {}
+		try {
+			unlinkSync(contentPath(this.dataDir, path));
+		} catch {}
+		try {
+			unlinkSync(metaPath(this.dataDir, path));
+		} catch {}
 	}
 
 	/**
@@ -286,7 +353,8 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 */
 	async deleteBatch(paths: string[]): Promise<void> {
 		for (const p of paths) {
-			await this.delete(p);
+			assertResourceIdentityAccess(this, 'deleteBatch', p);
+			this.deleteUnchecked(p);
 		}
 	}
 
@@ -303,9 +371,17 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 * ```
 	 */
 	async getUrl(path: string, options?: GetUrlOptionsFor<O>): Promise<string> {
+		assertResourceIdentityAccess(this, 'getUrl', path);
+		return this.signGetUrl(path, options);
+	}
+
+	private signGetUrl(path: string, options?: GetUrlOptionsFor<O>): string {
 		const expiresIn = (options as any)?.expiresIn ?? 3600;
 		const token = mintFileToken(this.fullId, path, 'GET', expiresIn, LOCAL_FILE_SECRET);
-		const encodedPath = path.split('/').map(s => encodeURIComponent(s)).join('/');
+		const encodedPath = path
+			.split('/')
+			.map((s) => encodeURIComponent(s))
+			.join('/');
 		let url = `${getDevBaseUrl()}/.bb-file-bucket/${this.fullId}/${encodedPath}?token=${token}`;
 		const versionId = (options as any)?.versionId;
 		if (versionId && this.versioned) url += `&versionId=${versionId}`;
@@ -328,9 +404,17 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 * ```
 	 */
 	async putUrl(path: string, options?: PutUrlOptions): Promise<string> {
+		assertResourceIdentityAccess(this, 'putUrl', path);
+		return this.signPutUrl(path, options);
+	}
+
+	private signPutUrl(path: string, options?: PutUrlOptions): string {
 		const expiresIn = options?.expiresIn ?? 3600;
 		const token = mintFileToken(this.fullId, path, 'PUT', expiresIn, LOCAL_FILE_SECRET, options?.contentType);
-		const encodedPath = path.split('/').map(s => encodeURIComponent(s)).join('/');
+		const encodedPath = path
+			.split('/')
+			.map((s) => encodeURIComponent(s))
+			.join('/');
 		return `${getDevBaseUrl()}/.bb-file-bucket/${this.fullId}/${encodedPath}?token=${token}`;
 	}
 
@@ -359,7 +443,8 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 * ```
 	 */
 	async getFileHandle(path: string, options?: GetUrlOptionsFor<O>): Promise<FileDownloadClient> {
-		const url = await this.getUrl(path, options);
+		assertResourceIdentityAccess(this, 'getFileHandle', path);
+		const url = this.signGetUrl(path, options);
 		return {
 			download: async () => {
 				const res = await fetch(url);
@@ -398,10 +483,8 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 * ```
 	 */
 	async createUploadHandle(path: string, options?: PutUrlOptions): Promise<FileUploadClient> {
-		const expiresIn = options?.expiresIn ?? 3600;
-		const token = mintFileToken(this.fullId, path, 'PUT', expiresIn, LOCAL_FILE_SECRET, options?.contentType);
-		const encodedPath = path.split('/').map(s => encodeURIComponent(s)).join('/');
-		const url = `${getDevBaseUrl()}/.bb-file-bucket/${this.fullId}/${encodedPath}?token=${token}`;
+		assertResourceIdentityAccess(this, 'createUploadHandle', path);
+		const url = this.signPutUrl(path, options);
 		const contentType = options?.contentType;
 		return {
 			upload: async (body: Blob | File | ArrayBuffer) => {
@@ -433,10 +516,19 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 * ```
 	 */
 	async *scan(options?: ScanOptions): AsyncIterable<FileInfo> {
+		const identity = assertResourceIdentityAccess(this, 'scan', options?.prefix);
 		const root = contentRoot(this.dataDir);
 		for (const absPath of this.walkDir(root)) {
 			const relPath = relative(root, absPath).replace(/\\/g, '/');
 			if (options?.prefix && !relPath.startsWith(options.prefix)) continue;
+			if (identity) {
+				try {
+					assertResourceIdentityAccess(this, 'scan', relPath);
+				} catch (error) {
+					if (isBlocksError(error, 'IdentityPool.Forbidden')) continue;
+					throw error;
+				}
+			}
 			// Skip files with delete markers
 			if (this.versioned && existsSync(deleteMarkerPath(this.dataDir, relPath))) continue;
 			const stat = statSync(absPath);
@@ -462,13 +554,14 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 * ```
 	 */
 	async listVersions(path: string): Promise<FileVersionInfo[]> {
+		assertResourceIdentityAccess(this, 'listVersions', path);
 		const versionsDir = versionsDirFor(this.dataDir, path);
 		if (!existsSync(versionsDir)) return [];
 		const entries = readdirSync(versionsDir).filter(isVersionEntry);
 		if (entries.length === 0) return [];
 
 		const hasDeleteMarker = existsSync(deleteMarkerPath(this.dataDir, path));
-		const versions: FileVersionInfo[] = entries.map(versionId => {
+		const versions: FileVersionInfo[] = entries.map((versionId) => {
 			const vPath = versionContentPath(this.dataDir, path, versionId);
 			const stat = statSync(vPath);
 			return { versionId, lastModified: stat.mtime, size: stat.size, isCurrent: false };
@@ -504,13 +597,14 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 	 * ```
 	 */
 	async restoreVersion(path: string, versionId: string): Promise<void> {
+		assertResourceIdentityAccess(this, 'restoreVersion', path);
 		const vPath = versionContentPath(this.dataDir, path, versionId);
 		if (!existsSync(vPath)) {
 			throw blocksError('NoSuchVersion', `Version "${versionId}" does not exist for "${path}"`);
 		}
 		const body = readFileSync(vPath);
 		const meta = this.readVersionMeta(path, versionId);
-		await this.put(path, body, { contentType: meta.contentType, metadata: meta.metadata });
+		await this.putUnchecked(path, body, { contentType: meta.contentType, metadata: meta.metadata });
 	}
 
 	/**
@@ -547,7 +641,9 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 
 	private readMetaFile(mPath: string): SidecarMeta {
 		if (existsSync(mPath)) {
-			try { return JSON.parse(readFileSync(mPath, 'utf8')); } catch {}
+			try {
+				return JSON.parse(readFileSync(mPath, 'utf8'));
+			} catch {}
 		}
 		return { contentType: 'application/octet-stream', metadata: {} };
 	}
@@ -570,9 +666,9 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 		const dir = versionsDirFor(this.dataDir, path);
 		if (!existsSync(dir)) return 'v1';
 		const existing = readdirSync(dir)
-			.filter(f => f.startsWith('v') && !f.includes('.'))
-			.map(f => parseInt(f.slice(1), 10))
-			.filter(n => !isNaN(n));
+			.filter((f) => f.startsWith('v') && !f.includes('.'))
+			.map((f) => parseInt(f.slice(1), 10))
+			.filter((n) => !isNaN(n));
 		return `v${(existing.length > 0 ? Math.max(...existing) : 0) + 1}`;
 	}
 }

@@ -5,6 +5,7 @@
 ```ts
 
 import type { ChildLogger } from '@aws-blocks/bb-logger';
+import type { IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 import { Scope } from '@aws-blocks/core';
 import type { ScopeParent } from '@aws-blocks/core';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
@@ -57,9 +58,13 @@ export const DistributedTableErrors: {
     readonly BatchIncomplete: "BatchIncompleteException";
 };
 
+// @public
+export type DistributedTableOperation = 'get' | 'put' | 'delete' | 'query' | 'scan' | 'getBatch' | 'putBatch' | 'deleteBatch';
+
 // @public (undocumented)
 export interface DistributedTableOptions<T, K extends TableKeyConfig<T> = TableKeyConfig<T>, Indexes extends Record<string, TableKeyConfig<T>> = Record<string, TableKeyConfig<T>>> {
     encryption?: 'aws-managed' | 'customer-managed' | ExternalKmsKeyRef;
+    identityAccess?: readonly IdentityResourceGrant<DistributedTableOperation>[];
     indexes?: Indexes;
     key: K;
     logger?: ChildLogger;

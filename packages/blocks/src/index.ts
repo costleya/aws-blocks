@@ -1,6 +1,21 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+export type { IdentityPoolOptions, IdentityPoolUser } from '@aws-blocks/bb-identity-pool';
+
+/**
+ * **Run selected Building Block operations with an end user's Cognito Identity Pool permissions.**
+ *
+ * Exchanges a configured OIDC provider token before entering an explicit user scope.
+ * Attach it to LambdaCompute to establish authenticated or guest credentials for
+ * every request. Resource identityAccess grants define permitted operations and keys.
+ * Package: `@aws-blocks/bb-identity-pool`; see its README for setup and limitations.
+ */
+export { IdentityPool, IdentityPoolErrors } from '@aws-blocks/bb-identity-pool';
+export type { IdentityPoolReference, LambdaComputeProps } from '@aws-blocks/bb-lambda-compute';
+/** Lambda-backed Compute with optional request identity and explicit resource grants. */
+export { LambdaCompute } from '@aws-blocks/bb-lambda-compute';
+export type { IdentityAccess, IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 // Re-export everything from core
 export * from '@aws-blocks/core';
 
@@ -256,6 +271,7 @@ export type { DistributedDatabaseOptions, TransactionOptions } from '@aws-blocks
 export { DistributedDatabase, DistributedDatabaseErrors } from '@aws-blocks/bb-distributed-data';
 export type {
 	DeleteOptions as DTDeleteOptions,
+	DistributedTableOperation,
 	DistributedTableOptions,
 	PutOptions as DTPutOptions,
 	QueryOptions as DTQueryOptions,
@@ -292,6 +308,7 @@ export { EmailClient, EmailErrors } from '@aws-blocks/bb-email-client';
 export type {
 	CorsRule,
 	ExternalBucketRef as FBExternalBucketRef,
+	FileBucketOperation,
 	FileBucketOptions,
 	FileContent,
 	FileInfo,
@@ -317,6 +334,7 @@ export { FileBucket, FileBucketErrors } from '@aws-blocks/bb-file-bucket';
 export type {
 	ChunkingConfig,
 	ChunkingStrategy,
+	KnowledgeBaseOperation,
 	KnowledgeBaseOptions,
 	MetadataFilter,
 	RetrieveOptions,
@@ -341,6 +359,7 @@ export type {
 	ConditionalDeleteOptions,
 	ConditionalWriteOptions,
 	ExternalTableRef,
+	KVStoreOperation,
 	KVStoreOptions,
 	PutOptions as KVPutOptions,
 } from '@aws-blocks/bb-kv-store';

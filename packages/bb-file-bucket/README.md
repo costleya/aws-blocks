@@ -38,11 +38,52 @@ const bucket = new FileBucket(scope, id, options?)
 | `corsRules` | `CorsRule[]` | CORS rules for browser-based access. See [CorsRule](#corsrule) for the wildcard-origin synth guard. |
 | `lifecycleRules` | `LifecycleRule[]` | Lifecycle rules for automatic expiration or storage class transitions. |
 | `accessLogging` | `boolean` | Enable S3 server access logging. **Default: falls back to the stack posture (`BlocksDefaults.accessLogging`)** when omitted — so a production-postured stack can opt every FileBucket into logging without a per-block flag. When enabled, a dedicated, locked-down log bucket is provisioned (all public access blocked, S3-managed encryption, SSL enforced) and the main bucket delivers its access logs there under the `access-logs/` prefix. Access logs expire automatically after the stack posture's `logRetention` (`ONE_WEEK` in sandbox / `ONE_YEAR` in production; `RetentionDays.INFINITE` keeps them indefinitely). Ignored by the mock and browser runtimes. |
+| `identityAccess` | `IdentityResourceGrant<FileBucketOperation>[]` | Explicit identity-pool access grants for an identity-bound compute. Each grant names an access role (`'authenticated'` or `'guest'`), FileBucket methods, and optional object-key patterns. No grant is implicit, including for guests. |
 | `bucket` | `ExternalBucketRef` | Wrap an existing S3 bucket instead of creating one. |
 | `logger` | `ChildLogger` | Optional logger for internal operations. When omitted, a default error-level logger is created. |
 | `removalPolicy` | `'destroy' \| 'retain'` | CDK removal behavior for the underlying S3 bucket. When omitted, it falls back to the stack posture default (`BlocksDefaults.removalPolicy` — `DESTROY` in sandbox, `RETAIN` in production); pass `'destroy'` or `'retain'` to set it explicitly per-block. `'destroy'` also enables `autoDeleteObjects` so the bucket can be emptied on teardown. Ignored by the mock and browser runtimes. |
 
 All FileBucket-provisioned buckets **enforce TLS unconditionally** (`enforceSSL: true`) — CDK attaches a bucket policy denying any request where `aws:SecureTransport` is `false`, closing the in-transit exposure gap. This is not configurable.
+
+### Identity-scoped access
+
+Bind an IdentityPool to the parent compute for CDK grant generation. An API
+method calls `await identityPool.assumeForIdentity(context)` before user-scoped
+FileBucket operations. Subsequent calls use the selected identity's temporary
+AWS credentials. The mock simulates `identityAccess` grants locally; AWS relies
+on the synthesized IAM role policy. Calls without an assumption use the ordinary
+handler client. `operations` uses the public method
+names from `FileBucketOperation`: `put`, `get`, `delete`, `deleteBatch`,
+`getUrl`, `putUrl`, `getFileHandle`, `createUploadHandle`, `scan`,
+`listVersions`, and `restoreVersion`.
+
+```typescript
+const bucket = new FileBucket(scope, 'uploads', {
+  identityAccess: [{
+    access: 'authenticated',
+    operations: ['put', 'get', 'getUrl', 'getFileHandle', 'delete'],
+    keyPatterns: ['uploads/${identityId}/*'],
+  }],
+});
+```
+
+`keyPatterns` supports `*` and `${identityId}`. Omit it to allow the listed
+operations for every object; use an explicit pattern to limit each identity to
+its own prefix. A grant containing `get` requires one or more
+slash-delimited prefix patterns ending in `/*`, such as
+`uploads/${identityId}/*`. This lets FileBucket use a prefix-scoped S3 listing
+to preserve `get()` returning `null` for a missing object without exposing
+adjacent prefixes such as `uploads` and `uploads-private`. An explicit `scan`
+or `listVersions` grant may omit `keyPatterns` for unrestricted listing. When
+either has patterns, they must also end in `/*`: S3 checks the requested list
+prefix, which could otherwise return adjacent keys. `scan` is constrained by
+its requested `prefix`, and `listVersions` by its `path`. `getUrl` and
+`getFileHandle` authorize their own operations and do not require a listing
+grant. A failed or expired assumption fails with `IdentityPool.Unauthorized`.
+For an assumed identity, the mock reports `IdentityPool.Forbidden` for a method
+or key outside its grants; AWS evaluates the role policy and S3 prefix/ARN
+restrictions. Presigned URLs and file handles use the selected credentials
+when minted and remain usable through their selected expiry.
 
 ### PutOptions
 
@@ -249,6 +290,3 @@ const bucket = new FileBucket(scope, 'uploads', {
 ## Local Development
 
 Mock data persists to disk at `.bb-data/{fullId}/` across dev server restarts. Internal data is segregated into sibling roots so it never collides with your keys: file bodies live under `content/`, metadata under `meta/`, and version history under `versions/`. Wipe with `rm -rf .bb-data`. Presigned URLs are served by the dev server at `/.bb-file-bucket/{fullId}/{path}?token=...`. Versioning is fully supported locally. Lifecycle rules and CORS have no effect locally.
-
-
-

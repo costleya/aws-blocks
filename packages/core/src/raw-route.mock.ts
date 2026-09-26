@@ -51,6 +51,10 @@ export class RawRoute extends Scope {
   constructor(scope: ScopeParent, id: string, options: RawRouteOptions) {
     super(id, { parent: scope });
     this.path = resolveRoutePath(scope, id, options);
-    registerRoute({ ...options, path: this.path });
+    registerRoute({
+      ...options,
+      path: this.path,
+      identityProviderFullId: (scope as { compute?: { identityProviderFullId?: string } }).compute?.identityProviderFullId,
+    });
   }
 }

@@ -17,11 +17,27 @@ import type { ScopeParent } from '@aws-blocks/core';
 import { Scope } from '@aws-blocks/core';
 import type { LambdaComputeProps } from './types.js';
 
-export type { LambdaComputeProps } from './types.js';
+export type { IdentityPoolReference, LambdaComputeProps } from './types.js';
 
 export class LambdaCompute extends Scope {
-	constructor(scope: ScopeParent, id: string, _options?: LambdaComputeProps) {
+	/**
+	 * This runtime handle is itself the compute selected by descendant scopes.
+	 * Scope initializes `compute` from its parent before this derived field runs;
+	 * replacing it here ensures `new Scope(..., { parent: compute })` keeps the
+	 * Lambda's identity-provider binding instead of falling back to the parent.
+	 */
+	override readonly compute: this = this;
+
+	/**
+	 * Identity provider selected for this compute at declaration time. Core uses
+	 * the matching compute association to enter its request-scoped identity
+	 * callback before application code runs.
+	 */
+	readonly identityProviderFullId?: string;
+
+	constructor(scope: ScopeParent, id: string, options?: LambdaComputeProps) {
 		super(id, { parent: scope });
+		this.identityProviderFullId = options?.identityPool?.fullId;
 	}
 
 	setEnv(_key: string, _value: string): void {}

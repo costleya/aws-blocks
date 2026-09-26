@@ -4,9 +4,10 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { rmSync } from 'node:fs';
-import { isBlocksError, hasAuthError } from '@aws-blocks/core';
+import { isBlocksError, hasAuthError, Scope } from '@aws-blocks/core';
 import type { BlocksContext } from '@aws-blocks/core';
 import type { AuthStateApi, AuthField } from '@aws-blocks/auth-common';
+import { KVStore } from '@aws-blocks/bb-kv-store';
 import { AuthCognito, AuthCognitoErrors } from './index.js';
 
 // `createApi()` returns a context-bound `ApiNamespace` callable; narrow it to
@@ -277,6 +278,38 @@ describe('signIn / signOut / getCurrentUser / requireAuth / checkAuth', () => {
 			() => auth.requireAuth(ctx),
 			(e: Error) => isBlocksError(e, AuthCognitoErrors.NotAuthenticated),
 		);
+	});
+});
+
+describe('identity-bound auth storage', () => {
+	test('keeps Cognito session records system-scoped without making sibling application stores system-scoped', async () => {
+		const pool = unique('identity-pool');
+		const app = new Scope(unique('identity-app'), {
+			compute: { identityProviderFullId: pool },
+		});
+		let confirmationCode = '';
+		const auth = new AuthCognito(app, 'auth', {
+			passwordPolicy: { minLength: 8 },
+			codeDelivery: async (_username, code) => {
+				confirmationCode = code;
+			},
+		});
+		const notes = new KVStore<string>(app, 'notes');
+		const applicationChild = new KVStore<string>(auth, 'application-child');
+		const { ctx } = freshContext();
+
+		await auth.signUp('identity-user', 'Password!1', { attributes: { email: 'identity-user@example.test' } });
+		await auth.confirmSignUp('identity-user', confirmationCode);
+		const signIn = await auth.signIn('identity-user', 'Password!1', ctx);
+		assert.strictEqual(signIn.status, 'signedIn');
+		assert.ok(await auth.getCurrentUser(ctx), 'the system-scoped session record supports a login round-trip');
+
+		await assert.rejects(() => notes.put('identity-user/note', 'private'), {
+			name: 'IdentityPool.Unauthorized',
+		});
+		await assert.rejects(() => applicationChild.put('identity-user/note', 'private'), {
+			name: 'IdentityPool.Unauthorized',
+		});
 	});
 });
 

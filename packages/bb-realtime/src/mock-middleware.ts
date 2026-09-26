@@ -144,10 +144,23 @@ function scheduleReconnect(wsUrl: string) {
 export function __resetConnectionsForTest(): void {
 	for (const conn of connections.values()) {
 		if (conn.reconnectTimer) clearTimeout(conn.reconnectTimer);
+		conn.reconnectTimer = undefined;
+		conn.isConnected = false;
 		conn.subscriptions.clear();
 		conn.channelTokens.clear();
+		conn.pendingSubs.length = 0;
+		conn.pendingMessages.length = 0;
+		conn.pendingEstablished.clear();
 		conn.disconnectHandlers.clear();
-		try { conn.ws?.close(); } catch {}
+		// A late open can replay subscriptions; a close can schedule reconnect.
+		if (conn.ws) {
+			conn.ws.onopen = null;
+			conn.ws.onmessage = null;
+			conn.ws.onclose = null;
+			conn.ws.onerror = null;
+			try { conn.ws.close(); } catch {}
+			conn.ws = undefined;
+		}
 	}
 	connections.clear();
 }

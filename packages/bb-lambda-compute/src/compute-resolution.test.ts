@@ -26,6 +26,24 @@ import { LambdaCompute } from './index.cdk.js';
 // create()'s internal defaultComputeFactory option.
 const lambdaFactory: DefaultComputeFactory = (root) => new LambdaCompute(root as never, 'DefaultCompute');
 
+// Compare construct identity as a boolean. A failed object-valued assertion
+// tries to format the entire connected CDK graph and can exhaust the heap.
+function assertSameConstruct(actual: unknown, expected: unknown, message: string): void {
+	assert.ok(actual === expected, message);
+}
+
+test('construct identity failures keep only booleans in the assertion payload', () => {
+	const actual = { self: {} };
+	actual.self = actual;
+	const expected = { self: {} };
+	expected.self = expected;
+	assert.throws(
+		() => assertSameConstruct(actual, expected, 'different constructs'),
+		(error: unknown) =>
+			error instanceof assert.AssertionError && error.actual === false && error.expected === true,
+	);
+});
+
 // The backend entry (for the NodejsFunction) and a no-op backend module (which
 // BlocksStack.create imports) are written to a temp dir under the package
 // rather than checked-in fixtures. The handler entry must live under the
@@ -67,8 +85,8 @@ describe('Scope.compute resolution', () => {
 
 		assert.ok(compute instanceof LambdaCompute, 'default resolves to a LambdaCompute');
 		// The stack's handler/gateway delegate to the default compute's.
-		assert.strictEqual(stack.handler, (compute as LambdaCompute).fn, 'stack.handler is the compute function');
-		assert.strictEqual(stack.gateway, (compute as LambdaCompute).apiGateway, 'stack.gateway is the compute gateway');
+		assertSameConstruct(stack.handler, (compute as LambdaCompute).fn, 'stack.handler is the compute function');
+		assertSameConstruct(stack.gateway, (compute as LambdaCompute).apiGateway, 'stack.gateway is the compute gateway');
 
 		// Exactly one function + gateway — the default compute's.
 		const template = Template.fromStack(stack);
@@ -81,8 +99,8 @@ describe('Scope.compute resolution', () => {
 		const a = new Scope('a').compute;
 		const b = new Scope('b').compute;
 
-		assert.strictEqual(a, b, 'all blocks share the one default compute');
-		assert.strictEqual(stack._defaultCompute, a, 'cached on the owner');
+		assertSameConstruct(a, b, 'all blocks share the one default compute');
+		assertSameConstruct(stack._defaultCompute, a, 'cached on the owner');
 	});
 
 	test('explicit _compute on the block takes precedence', async () => {
@@ -92,7 +110,7 @@ describe('Scope.compute resolution', () => {
 		const block = new Scope('block');
 		block._compute = explicit;
 
-		assert.strictEqual(block.compute, explicit, 'block _compute wins over the default');
+		assertSameConstruct(block.compute, explicit, 'block _compute wins over the default');
 	});
 
 	test('descendant inherits an ancestor scope compute', async () => {
@@ -104,7 +122,24 @@ describe('Scope.compute resolution', () => {
 		const middle = new Scope('middle', { parent: outer });
 		const leaf = new Scope('leaf', { parent: middle });
 
-		assert.strictEqual(leaf.compute, scoped, 'descendant resolves to the ancestor compute');
+		assertSameConstruct(leaf.compute, scoped, 'descendant resolves to the ancestor compute');
+	});
+
+	test('a real LambdaCompute is its descendants\' compute and ScopeOptions.compute preserves that binding', async () => {
+		await makeStack('ComputeIdentityParent');
+
+		const root = new Scope('users-root');
+		const users = new LambdaCompute(root, 'users');
+		const data = new Scope('data', { parent: users });
+		const nested = new Scope('nested', { parent: data });
+		const explicitlyBound = new Scope('explicit', { parent: root, compute: users });
+		const sibling = new Scope('sibling', { parent: root });
+
+		assertSameConstruct(users.compute, users, 'a compute must resolve to itself');
+		assertSameConstruct(data.compute, users, 'a direct child inherits its parent LambdaCompute');
+		assertSameConstruct(nested.compute, users, 'nested descendants retain the LambdaCompute binding');
+		assertSameConstruct(explicitlyBound.compute, users, 'ScopeOptions.compute selects the public compute binding');
+		assert.ok(sibling.compute !== users, 'a sibling remains on the unbound default compute');
 	});
 
 	test('nearest assignment wins along the ancestor chain', async () => {
@@ -120,9 +155,9 @@ describe('Scope.compute resolution', () => {
 		inner._compute = innerCompute;
 
 		const leaf = new Scope('leaf', { parent: inner });
-		assert.strictEqual(leaf.compute, innerCompute, 'nearest ancestor assignment wins');
+		assertSameConstruct(leaf.compute, innerCompute, 'nearest ancestor assignment wins');
 
 		leaf._compute = ownCompute;
-		assert.strictEqual(leaf.compute, ownCompute, 'the block’s own assignment beats any ancestor');
+		assertSameConstruct(leaf.compute, ownCompute, 'the block’s own assignment beats any ancestor');
 	});
 });

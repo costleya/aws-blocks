@@ -45,6 +45,16 @@ per-invocation limit or API Gateway's ~29s cap.
 grants, the container env, and the handler's invoke permission — so it can later fold into a per-BB
 compute abstraction (should one land) without touching call sites.
 
+## Compute Identity Boundary
+
+Agent rejects construction on an identity-bound compute with
+`IdentityComputeUnsupportedException`. The AgentCore runtime accepts a request
+and runs the turn in background work, where the request's temporary identity
+credentials are not present. Conversation rows, message rows, and session
+snapshots are application data, so Agent does not mark them as system metadata
+or grant them through the shared system role. The rejection happens before
+provisioning the bucket, tables, Realtime child, or AgentCore runtime.
+
 ## Session Persistence
 
 Two storage backends, same FileBucket BB:

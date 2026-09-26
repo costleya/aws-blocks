@@ -5,6 +5,7 @@
 ```ts
 
 import type { ChildLogger } from '@aws-blocks/bb-logger';
+import type { IdentityResourceGrant } from '@aws-blocks/core/bb-utils';
 import { Scope } from '@aws-blocks/core';
 import type { ScopeParent } from '@aws-blocks/core';
 
@@ -44,10 +45,14 @@ export const KnowledgeBaseErrors: {
 };
 
 // @public
+export type KnowledgeBaseOperation = 'retrieve' | 'isSynced' | 'waitUntilSynced';
+
+// @public
 export interface KnowledgeBaseOptions {
     chunking?: ChunkingConfig;
     description?: string;
     embeddingDimensions?: 256 | 512 | 1024;
+    identityAccess?: readonly IdentityResourceGrant<KnowledgeBaseOperation>[];
     logger?: ChildLogger;
     removalPolicy?: 'destroy' | 'retain';
     source: SourceConfig;

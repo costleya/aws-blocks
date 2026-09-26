@@ -3,6 +3,7 @@
 
 import { Scope, registerSdkIdentifiers, getSdkIdentifiers } from '@aws-blocks/core';
 import type { ScopeParent } from '@aws-blocks/core';
+import { getComputeIdentityProvider } from '@aws-blocks/core/bb-utils';
 import { DistributedTable } from '@aws-blocks/bb-distributed-table';
 import { Realtime } from '@aws-blocks/bb-realtime';
 import { FileBucket } from '@aws-blocks/bb-file-bucket';
@@ -203,6 +204,12 @@ export class AgentBase<TContext = DefaultToolContext> extends Scope {
 	 */
 	constructor(scope: ScopeParent, id: string, config: AgentConfig<TContext>, modelConfig: ModelConfig | ModelConfig[] | undefined, createSnapshotStorage: (bucket: FileBucket) => SnapshotStorage) {
 		super(id, { parent: scope, bbName: BB_NAME, bbVersion: BB_VERSION });
+		if (getComputeIdentityProvider(this)) {
+			throw blocksAgentError(
+				AgentErrors.IdentityComputeUnsupported,
+				`Agent "${this.fullId}" cannot run on an identity-bound compute because its AgentCore background runtime cannot forward request identity.`,
+			);
+		}
 		this.log = config?.logger ?? new Logger(this, 'logger', { level: 'error' });
 		this.config = config;
 		validateCap('maxLlmCalls', config.maxLlmCalls);

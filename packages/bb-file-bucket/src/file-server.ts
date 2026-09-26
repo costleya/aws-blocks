@@ -13,13 +13,13 @@
  * there is no direct-write fallback.
  */
 
-import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { isBlocksError } from '@aws-blocks/core';
-import { validateFileToken, LOCAL_FILE_SECRET } from './tokens.js';
 import { assertContainedPath } from './mock-utils.js';
-import { contentRoot, contentPath, metaPath, versionContentPath, versionMetaPath } from './paths.js';
+import { contentPath, contentRoot, metaPath, versionContentPath, versionMetaPath } from './paths.js';
+import { LOCAL_FILE_SECRET, validateFileToken } from './tokens.js';
 
 const PREFIX = '/.bb-file-bucket/';
 
@@ -55,7 +55,9 @@ function sendError(res: ServerResponse, status: number, error: string): void {
 }
 
 export function attach(httpServer: Server) {
-	const originalListeners = httpServer.listeners('request').slice() as Array<(req: IncomingMessage, res: ServerResponse) => void>;
+	const originalListeners = httpServer.listeners('request').slice() as Array<
+		(req: IncomingMessage, res: ServerResponse) => void
+	>;
 	httpServer.removeAllListeners('request');
 
 	httpServer.on('request', (req: IncomingMessage, res: ServerResponse) => {
@@ -179,9 +181,10 @@ export function attach(httpServer: Server) {
 			// validation. The dev server and the buckets share a process, so the
 			// instance is always registered in practice; if it's missing, fail
 			// loud rather than silently writing an unversioned object.
-			const registry: Map<string, { put?: unknown }> | undefined = (globalThis as any).__BLOCKS_FILE_BUCKET_REGISTRY__;
+			const registry: Map<string, { putFromPresignedUrl?: unknown }> | undefined = (globalThis as any)
+				.__BLOCKS_FILE_BUCKET_REGISTRY__;
 			const bucket = registry?.get(fullId);
-			if (!bucket || typeof bucket.put !== 'function') {
+			if (!bucket || typeof bucket.putFromPresignedUrl !== 'function') {
 				sendError(res, 500, `No FileBucket registered for "${fullId}" — cannot handle upload`);
 				return;
 			}
@@ -206,19 +209,25 @@ export function attach(httpServer: Server) {
 				return;
 			}
 
-			collectBody(req).then(async (body) => {
-				// When a contentType was signed, it equals the (now validated)
-				// request header. Otherwise fall back to whatever the request
-				// sent, then octet-stream — matching S3's stored content type.
-				const contentType = valid.contentType || requestContentType || 'application/octet-stream';
-				await (bucket.put as (p: string, b: Buffer, o: { contentType: string }) => Promise<void>)(
-					path, body, { contentType },
-				);
-				res.writeHead(200);
-				res.end();
-			}).catch((err) => {
-				sendError(res, 500, err instanceof Error ? err.message : String(err));
-			});
+			collectBody(req)
+				.then(async (body) => {
+					// When a contentType was signed, it equals the (now validated)
+					// request header. Otherwise fall back to whatever the request
+					// sent, then octet-stream — matching S3's stored content type.
+					const contentType = valid.contentType || requestContentType || 'application/octet-stream';
+					await (
+						bucket.putFromPresignedUrl as (
+							p: string,
+							b: Buffer,
+							o: { contentType: string },
+						) => Promise<void>
+					)(path, body, { contentType });
+					res.writeHead(200);
+					res.end();
+				})
+				.catch((err) => {
+					sendError(res, 500, err instanceof Error ? err.message : String(err));
+				});
 		} else {
 			res.writeHead(405);
 			res.end();

@@ -19,10 +19,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { BlocksStack, BlocksPresets } from '@aws-blocks/core/cdk';
+import { BlocksStack, BlocksPresets, Scope } from '@aws-blocks/core/cdk';
 import type { DefaultComputeFactory } from '@aws-blocks/core/cdk/internal';
 import { LambdaCompute } from '@aws-blocks/bb-lambda-compute/cdk';
-import { Agent } from './index.cdk.js';
+import { Agent, AgentErrors } from './index.cdk.js';
 
 /**
  * Inject LambdaCompute as the stack's default compute, the same way
@@ -80,6 +80,42 @@ test('CDK: Agent provisions an AgentCore Runtime for the loop', async () => {
 	assert.ok(
 		Object.keys(template.findResources('AWS::BedrockAgentCore::Runtime')).length >= 1,
 		'expected an AWS::BedrockAgentCore::Runtime resource',
+	);
+});
+
+test('CDK: identity-bound compute rejects Agent before provisioning AgentCore persistence', async () => {
+	const app = new cdk.App();
+	const stack = await BlocksStack.create(app, 'identity-bound-agent', {
+		backendHandlerPath: handlerPath,
+		backendCDKPath: backendPath,
+		defaults: BlocksPresets.production,
+		defaultComputeFactory: lambdaFactory,
+	});
+	const scoped = new Scope('identity-bound', { parent: stack });
+	scoped._compute = { identityProviderFullId: 'identity-bound-agent/pool' } as never;
+
+	assert.throws(
+		() => new Agent(scoped, 'agent', { systemPrompt: 'test', agentcoreAssetPath: ASSET_DIR }),
+		(error: unknown) => error instanceof Error && error.name === AgentErrors.IdentityComputeUnsupported,
+	);
+	const rejectedAgent = scoped.node.tryFindChild('agent');
+	assert.ok(rejectedAgent, 'the constructor reaches its own scope before rejecting');
+	assert.strictEqual(
+		rejectedAgent.node.children.length,
+		0,
+		'the rejected Agent must not create FileBucket, DistributedTable, Realtime, or AgentCore children',
+	);
+
+	const template = Template.fromStack(stack);
+	assert.strictEqual(
+		Object.keys(template.findResources('AWS::BedrockAgentCore::Runtime')).length,
+		0,
+		'the rejected Agent must not provision its background runtime',
+	);
+	assert.strictEqual(
+		Object.keys(template.findResources('AWS::DynamoDB::Table')).length,
+		0,
+		'the rejected Agent must not provision conversation or Realtime persistence',
 	);
 });
 

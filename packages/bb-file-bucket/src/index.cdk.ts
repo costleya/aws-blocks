@@ -1,17 +1,36 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import { Duration, RemovalPolicy } from 'aws-cdk-lib';
-import { RetentionDays } from 'aws-cdk-lib/aws-logs';
-import { BuildingBlockScope } from '@aws-blocks/core/cdk';
 import type { ScopeParent } from '@aws-blocks/core';
-import type { FileBucketOptions, CorsRule, LifecycleRule, ExternalBucketRef } from './types.js';
+import {
+	BuildingBlockScope,
+	getComputeIdentityProvider,
+	grantComputeIdentityAccess,
+	interpolateIdentityKeyPatternForIam,
+} from '@aws-blocks/core/cdk';
+import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import { RetentionDays } from 'aws-cdk-lib/aws-logs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { validateBucketName } from './bucket-name.js';
+import { validateIdentityListAccess } from './identity-access.js';
+import type { CorsRule, ExternalBucketRef, FileBucketOptions } from './types.js';
 
 export { FileBucketErrors } from './errors.js';
-export type { FileBucketOptions, PutOptions, GetUrlOptions, PutUrlOptions, ScanOptions, FileContent, FileInfo, CorsRule, LifecycleRule, ExternalBucketRef } from './types.js';
+export type {
+	CorsRule,
+	ExternalBucketRef,
+	FileBucketOperation,
+	FileBucketOptions,
+	FileContent,
+	FileInfo,
+	GetUrlOptions,
+	LifecycleRule,
+	PutOptions,
+	PutUrlOptions,
+	ScanOptions,
+} from './types.js';
 
 const httpMethodMap: Record<string, s3.HttpMethods> = {
 	GET: s3.HttpMethods.GET,
@@ -41,154 +60,234 @@ export class FileBucket<O extends FileBucketOptions = FileBucketOptions> extends
 
 	constructor(scope: ScopeParent, id: string, options?: O) {
 		super(id, { parent: scope, vpc: { gatewayEndpoints: [ec2.GatewayVpcEndpointAwsService.S3] } });
+		for (const grant of options?.identityAccess ?? []) validateIdentityListAccess(grant);
 
 		if (options?.bucket) {
 			// `fromExisting`: don't provision; bind to the pre-existing bucket and
-			// grant read/write to the Blocks runtime Lambda.
+			// apply ordinary or identity-scoped grants after this shared setup.
 			this.bucket = s3.Bucket.fromBucketName(this, 'bucket', options.bucket.bucketName);
+		} else {
+			// Resolve durability from the per-block option (a `'destroy'|'retain'`
+			// string, normalized to a CDK RemovalPolicy) falling back to the
+			// stack-wide `defaults`. This replaces the old `sandboxMode` context
+			// read — the sandbox posture now flows in through the chosen preset,
+			// exactly like bb-kv-store. Explicit `removalPolicy` from the customer
+			// still takes precedence. `autoDeleteObjects: true` is only valid paired
+			// with DESTROY (CDK validates this at construct time), so we derive the
+			// two from the same resolved policy.
+			const removalPolicy =
+				options?.removalPolicy === 'destroy'
+					? RemovalPolicy.DESTROY
+					: options?.removalPolicy === 'retain'
+						? RemovalPolicy.RETAIN
+						: this.defaults.removalPolicy;
+			const destroy = removalPolicy === RemovalPolicy.DESTROY;
+
+			// Bucket name is derived from the scope chain. Validate against S3's
+			// naming rules at synth so an invalid name fails here rather than at
+			// `cdk deploy` (where CloudFormation rejects it with a cryptic error).
+			// Run this first: an unusable bucket name is the most fundamental synth
+			// error, so surface it before the option-level guards below.
+			validateBucketName(this.fullId);
+
+			// Reject unsafe CORS at synth: a wildcard origin ('*') combined with a
+			// mutating method (PUT/POST/DELETE) lets any site issue state-changing
+			// cross-origin requests. Fail loud here rather than deploying it.
+			for (const rule of options?.corsRules ?? []) {
+				if (rule.allowedOrigins.includes('*')) {
+					const mutating = rule.allowedMethods.filter((m) => MUTATING_CORS_METHODS.includes(m));
+					if (mutating.length > 0) {
+						throw new Error(
+							`FileBucket "${this.fullId}": CORS rule with wildcard origin '*' must not allow mutating method(s) ${mutating.join(', ')}. ` +
+								`Specify explicit allowedOrigins (e.g. 'https://app.example.com') for ${mutating.join(', ')} instead of '*'.`,
+						);
+					}
+				}
+			}
+
+			// Reject a non-positive or non-integer noncurrent-version expiration at
+			// synth whenever the option is provided. A zero, negative, or fractional
+			// value would produce a degenerate lifecycle expiration
+			// (Duration.days(0) / negative) that only surfaces at deploy. The FORMAT
+			// is validated regardless of `versioned` so a malformed value is caught
+			// even when versioning is off; the rule itself is only APPLIED when
+			// versioning is on (see the main-bucket lifecycle rules below).
+			if (options?.noncurrentVersionExpirationDays !== undefined) {
+				const days = options.noncurrentVersionExpirationDays;
+				if (!Number.isInteger(days) || days <= 0) {
+					throw new Error(
+						`FileBucket "${this.fullId}": noncurrentVersionExpirationDays must be a positive integer (got ${days}). ` +
+							`Omit it to use the default of ${DEFAULT_NONCURRENT_VERSION_EXPIRATION_DAYS} days.`,
+					);
+				}
+			}
+
+			// Versioning stays on by default (secure default): a posture-driven
+			// `versioned` default would require a new `BlocksDefaults` field in
+			// core, which is out of scope for this change, so we keep the
+			// default-on and bound its cost with a noncurrent-version expiration
+			// below.
+			const versioned = options?.versioned ?? true;
+
+			// Opt-in server access logging: provision a dedicated, locked-down log
+			// bucket and expire its logs after the framework retention. Kept
+			// separate from the data bucket so log delivery can't loop back on it.
+			// Resolves from the stack `defaults.accessLogging` when no per-block
+			// option is given, so a production-postured stack opts every FileBucket
+			// in without a per-block flag.
+			const accessLogging = options?.accessLogging ?? this.defaults.accessLogging;
+			let serverAccessLogsBucket: s3.Bucket | undefined;
+			if (accessLogging) {
+				// The access-log lifecycle expiry derives from the framework-wide
+				// `logRetention` default (a `RetentionDays` enum). `RetentionDays`
+				// is a numeric enum whose member value IS the day count
+				// (ONE_WEEK === 7, ONE_YEAR === 365), so it maps directly to
+				// `Duration.days(...)`. The one non-day member is INFINITE (=== 9999,
+				// "retain forever"): for it we omit the lifecycle rule so logs are
+				// never expired, rather than expiring them at a spurious 9999 days.
+				const logRetention = this.defaults.logRetention;
+				const logLifecycleRules =
+					logRetention === RetentionDays.INFINITE
+						? undefined
+						: [{ id: 'expire-access-logs', expiration: Duration.days(logRetention) }];
+				serverAccessLogsBucket = new s3.Bucket(this, 'access-logs', {
+					blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+					encryption: s3.BucketEncryption.S3_MANAGED,
+					enforceSSL: true,
+					removalPolicy,
+					autoDeleteObjects: destroy,
+					lifecycleRules: logLifecycleRules,
+				});
+			}
+
+			// Main-bucket lifecycle rules: the noncurrent-version expiration (only
+			// when versioning is on, to bound version-storage growth) merged with
+			// any customer-supplied lifecycle rules into a single array.
+			const lifecycleRules: s3.LifecycleRule[] = [];
+			if (versioned) {
+				lifecycleRules.push({
+					id: 'ExpireNoncurrentVersions',
+					enabled: true,
+					noncurrentVersionExpiration: Duration.days(
+						options?.noncurrentVersionExpirationDays ?? DEFAULT_NONCURRENT_VERSION_EXPIRATION_DAYS,
+					),
+				});
+			}
+			for (const rule of options?.lifecycleRules ?? []) {
+				lifecycleRules.push({
+					prefix: rule.prefix,
+					expiration: rule.expirationDays ? Duration.days(rule.expirationDays) : undefined,
+					transitions: rule.transitionToIaDays
+						? [
+								{
+									storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+									transitionAfter: Duration.days(rule.transitionToIaDays),
+								},
+							]
+						: undefined,
+				});
+			}
+
+			this.bucket = new s3.Bucket(this, 'bucket', {
+				bucketName: this.fullId,
+				blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+				encryption: s3.BucketEncryption.S3_MANAGED,
+				// All FileBucket traffic (SDK calls + presigned URLs) is HTTPS, so
+				// enforce TLS to close the in-transit exposure gap unconditionally.
+				enforceSSL: true,
+				versioned,
+				removalPolicy,
+				autoDeleteObjects: destroy,
+				serverAccessLogsBucket,
+				serverAccessLogsPrefix: serverAccessLogsBucket ? 'access-logs/' : undefined,
+				cors: options?.corsRules?.map((rule: CorsRule) => ({
+					allowedOrigins: rule.allowedOrigins,
+					allowedMethods: rule.allowedMethods.map((m) => httpMethodMap[m]),
+					allowedHeaders: rule.allowedHeaders,
+					exposedHeaders: rule.exposedHeaders,
+					maxAge: rule.maxAge,
+				})),
+				lifecycleRules: lifecycleRules.length > 0 ? lifecycleRules : undefined,
+			});
+		}
+
+		// An identity-bound compute must never retain an execution-role data grant.
+		// Detect the binding without resolving a role: a guest-only Identity Pool
+		// has no authenticated role to look up. Each declared grant below resolves
+		// only the role named by that grant.
+		if (!getComputeIdentityProvider(this)) {
 			this.bucket.grantReadWrite(this.executionRole);
 			return;
 		}
 
-		// Resolve durability from the per-block option (a `'destroy'|'retain'`
-		// string, normalized to a CDK RemovalPolicy) falling back to the
-		// stack-wide `defaults`. This replaces the old `sandboxMode` context
-		// read — the sandbox posture now flows in through the chosen preset,
-		// exactly like bb-kv-store. Explicit `removalPolicy` from the customer
-		// still takes precedence. `autoDeleteObjects: true` is only valid paired
-		// with DESTROY (CDK validates this at construct time), so we derive the
-		// two from the same resolved policy.
-		const removalPolicy =
-			options?.removalPolicy === 'destroy'
-				? RemovalPolicy.DESTROY
-				: options?.removalPolicy === 'retain'
-					? RemovalPolicy.RETAIN
-					: this.defaults.removalPolicy;
-		const destroy = removalPolicy === RemovalPolicy.DESTROY;
+		for (const grant of options?.identityAccess ?? []) {
+			this.grantIdentityAccess(grant);
+		}
+	}
 
-		// Bucket name is derived from the scope chain. Validate against S3's
-		// naming rules at synth so an invalid name fails here rather than at
-		// `cdk deploy` (where CloudFormation rejects it with a cryptic error).
-		// Run this first: an unusable bucket name is the most fundamental synth
-		// error, so surface it before the option-level guards below.
-		validateBucketName(this.fullId);
+	private grantIdentityAccess(grant: NonNullable<FileBucketOptions['identityAccess']>[number]): void {
+		const patterns = grant.keyPatterns;
+		if (patterns?.length === 0) return;
+		const iamPatterns = (patterns ?? ['*']).map(interpolateIdentityKeyPatternForIam);
+		const objectActions = new Set<string>();
+		const bucketActions = new Set<string>();
 
-		// Reject unsafe CORS at synth: a wildcard origin ('*') combined with a
-		// mutating method (PUT/POST/DELETE) lets any site issue state-changing
-		// cross-origin requests. Fail loud here rather than deploying it.
-		for (const rule of options?.corsRules ?? []) {
-			if (rule.allowedOrigins.includes('*')) {
-				const mutating = rule.allowedMethods.filter(m => MUTATING_CORS_METHODS.includes(m));
-				if (mutating.length > 0) {
-					throw new Error(
-						`FileBucket "${this.fullId}": CORS rule with wildcard origin '*' must not allow mutating method(s) ${mutating.join(', ')}. ` +
-						`Specify explicit allowedOrigins (e.g. 'https://app.example.com') for ${mutating.join(', ')} instead of '*'.`,
-					);
-				}
+		for (const operation of grant.operations) {
+			switch (operation) {
+				case 'get':
+					// Allow the scoped ListObjectsV2 existence probe after a GetObject
+					// AccessDenied response without granting an unscoped bucket listing.
+					bucketActions.add('s3:ListBucket');
+					objectActions.add('s3:GetObject');
+					objectActions.add('s3:GetObjectVersion');
+					break;
+				case 'getUrl':
+				case 'getFileHandle':
+					objectActions.add('s3:GetObject');
+					objectActions.add('s3:GetObjectVersion');
+					break;
+				case 'put':
+				case 'putUrl':
+				case 'createUploadHandle':
+					objectActions.add('s3:PutObject');
+					break;
+				case 'delete':
+				case 'deleteBatch':
+					objectActions.add('s3:DeleteObject');
+					objectActions.add('s3:DeleteObjectVersion');
+					break;
+				case 'restoreVersion':
+					objectActions.add('s3:GetObject');
+					objectActions.add('s3:GetObjectVersion');
+					objectActions.add('s3:PutObject');
+					break;
+				case 'scan':
+					bucketActions.add('s3:ListBucket');
+					break;
+				case 'listVersions':
+					bucketActions.add('s3:ListBucketVersions');
+					break;
 			}
 		}
 
-		// Reject a non-positive or non-integer noncurrent-version expiration at
-		// synth whenever the option is provided. A zero, negative, or fractional
-		// value would produce a degenerate lifecycle expiration
-		// (Duration.days(0) / negative) that only surfaces at deploy. The FORMAT
-		// is validated regardless of `versioned` so a malformed value is caught
-		// even when versioning is off; the rule itself is only APPLIED when
-		// versioning is on (see the main-bucket lifecycle rules below).
-		if (options?.noncurrentVersionExpirationDays !== undefined) {
-			const days = options.noncurrentVersionExpirationDays;
-			if (!Number.isInteger(days) || days <= 0) {
-				throw new Error(
-					`FileBucket "${this.fullId}": noncurrentVersionExpirationDays must be a positive integer (got ${days}). ` +
-					`Omit it to use the default of ${DEFAULT_NONCURRENT_VERSION_EXPIRATION_DAYS} days.`,
+		grantComputeIdentityAccess(this, grant.access, (role) => {
+			if (objectActions.size > 0) {
+				role.addToPrincipalPolicy(
+					new PolicyStatement({
+						actions: [...objectActions],
+						resources: iamPatterns.map((pattern) => `${this.bucket.bucketArn}/${pattern}`),
+					}),
 				);
 			}
-		}
-
-		// Versioning stays on by default (secure default): a posture-driven
-		// `versioned` default would require a new `BlocksDefaults` field in
-		// core, which is out of scope for this change, so we keep the
-		// default-on and bound its cost with a noncurrent-version expiration
-		// below.
-		const versioned = options?.versioned ?? true;
-
-		// Opt-in server access logging: provision a dedicated, locked-down log
-		// bucket and expire its logs after the framework retention. Kept
-		// separate from the data bucket so log delivery can't loop back on it.
-		// Resolves from the stack `defaults.accessLogging` when no per-block
-		// option is given, so a production-postured stack opts every FileBucket
-		// in without a per-block flag.
-		const accessLogging = options?.accessLogging ?? this.defaults.accessLogging;
-		let serverAccessLogsBucket: s3.Bucket | undefined;
-		if (accessLogging) {
-			// The access-log lifecycle expiry derives from the framework-wide
-			// `logRetention` default (a `RetentionDays` enum). `RetentionDays`
-			// is a numeric enum whose member value IS the day count
-			// (ONE_WEEK === 7, ONE_YEAR === 365), so it maps directly to
-			// `Duration.days(...)`. The one non-day member is INFINITE (=== 9999,
-			// "retain forever"): for it we omit the lifecycle rule so logs are
-			// never expired, rather than expiring them at a spurious 9999 days.
-			const logRetention = this.defaults.logRetention;
-			const logLifecycleRules =
-				logRetention === RetentionDays.INFINITE
-					? undefined
-					: [{ id: 'expire-access-logs', expiration: Duration.days(logRetention) }];
-			serverAccessLogsBucket = new s3.Bucket(this, 'access-logs', {
-				blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-				encryption: s3.BucketEncryption.S3_MANAGED,
-				enforceSSL: true,
-				removalPolicy,
-				autoDeleteObjects: destroy,
-				lifecycleRules: logLifecycleRules,
-			});
-		}
-
-		// Main-bucket lifecycle rules: the noncurrent-version expiration (only
-		// when versioning is on, to bound version-storage growth) merged with
-		// any customer-supplied lifecycle rules into a single array.
-		const lifecycleRules: s3.LifecycleRule[] = [];
-		if (versioned) {
-			lifecycleRules.push({
-				id: 'ExpireNoncurrentVersions',
-				enabled: true,
-				noncurrentVersionExpiration: Duration.days(
-					options?.noncurrentVersionExpirationDays ?? DEFAULT_NONCURRENT_VERSION_EXPIRATION_DAYS,
-				),
-			});
-		}
-		for (const rule of options?.lifecycleRules ?? []) {
-			lifecycleRules.push({
-				prefix: rule.prefix,
-				expiration: rule.expirationDays ? Duration.days(rule.expirationDays) : undefined,
-				transitions: rule.transitionToIaDays ? [{
-					storageClass: s3.StorageClass.INFREQUENT_ACCESS,
-					transitionAfter: Duration.days(rule.transitionToIaDays),
-				}] : undefined,
-			});
-		}
-
-		this.bucket = new s3.Bucket(this, 'bucket', {
-			bucketName: this.fullId,
-			blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-			encryption: s3.BucketEncryption.S3_MANAGED,
-			// All FileBucket traffic (SDK calls + presigned URLs) is HTTPS, so
-			// enforce TLS to close the in-transit exposure gap unconditionally.
-			enforceSSL: true,
-			versioned,
-			removalPolicy,
-			autoDeleteObjects: destroy,
-			serverAccessLogsBucket,
-			serverAccessLogsPrefix: serverAccessLogsBucket ? 'access-logs/' : undefined,
-			cors: options?.corsRules?.map((rule: CorsRule) => ({
-				allowedOrigins: rule.allowedOrigins,
-				allowedMethods: rule.allowedMethods.map(m => httpMethodMap[m]),
-				allowedHeaders: rule.allowedHeaders,
-				exposedHeaders: rule.exposedHeaders,
-				maxAge: rule.maxAge,
-			})),
-			lifecycleRules: lifecycleRules.length > 0 ? lifecycleRules : undefined,
+			if (bucketActions.size > 0) {
+				role.addToPrincipalPolicy(
+					new PolicyStatement({
+						actions: [...bucketActions],
+						resources: [this.bucket.bucketArn],
+						...(patterns ? { conditions: { StringLike: { 's3:prefix': iamPatterns } } } : {}),
+					}),
+				);
+			}
 		});
-
-		this.bucket.grantReadWrite(this.executionRole);
 	}
 }

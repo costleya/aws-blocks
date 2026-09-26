@@ -4,6 +4,7 @@
 import type { ScopeParent } from '@aws-blocks/core';
 import {
 	BLOCKS_RPC_PREFIX,
+	bindComputeIdentityProvider,
 	blocksNodejsBundling,
 	DEFAULT_NODE_RUNTIME,
 	ensureApiGatewayAccount,
@@ -19,7 +20,7 @@ import { LogGroup } from 'aws-cdk-lib/aws-logs';
 import { applyXRayTracing, buildHealthWidgets, buildLoggingWidgets, buildTracingWidgets } from './observability.js';
 import type { LambdaComputeProps } from './types.js';
 
-export type { LambdaComputeProps } from './types.js';
+export type { IdentityPoolReference, LambdaComputeProps } from './types.js';
 
 /**
  * Process-global brand marking a {@link LambdaCompute} instance. Registered via
@@ -41,8 +42,8 @@ const LAMBDA_COMPUTE_BRAND: unique symbol = Symbol.for('blocks:LambdaCompute');
  * never caller-supplied — so every compute in an app runs the same backend and
  * agrees on the runtime resource-name namespace.
  *
- * @internal Not exported from the package's public entry point. Customers
- * cannot instantiate a compute until the customer-facing surface exists.
+ * The CDK entry point and the public AWS Blocks umbrella export this construct.
+ * Parent APIs and resources under it to select their compute and optional identity provider.
  */
 export class LambdaCompute extends Compute {
 	/**
@@ -66,6 +67,13 @@ export class LambdaCompute extends Compute {
 
 	constructor(scope: ScopeParent, id: string, options?: LambdaComputeProps) {
 		super(id, { parent: scope });
+
+		// An Identity Pool is bound to this exact compute, rather than its parent
+		// scope or the stack default. Core records the association for request
+		// dispatch so valid authenticated identities enter the provider scope before
+		// application handlers run; the provider itself remains structural to avoid
+		// a dependency on its concrete Building Block package.
+		if (options?.identityPool) bindComputeIdentityProvider(this, options.identityPool.fullId);
 
 		// The single CloudWatch log group for the handler. Owning it (a real
 		// LogGroup passed as the function's `logGroup`) makes its retention follow
