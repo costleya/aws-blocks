@@ -694,7 +694,7 @@ const agent = new Agent(scope, 'assistant', {
 });
 ```
 
-Keys match literal phrases in the latest message, case-insensitively with flexible internal whitespace and word boundaries. Punctuation is literal, and the first matching dictionary entry wins. Values are emitted verbatim, including whitespace and empty strings. Tool-result summaries and tool calls take precedence; unmatched text still receives the generic canned fallback. Omitting `cannedResponses` preserves the existing responses and streaming behavior.
+Keys match literal phrases in the latest message, case-insensitively with flexible internal whitespace and word boundaries. Punctuation is literal, and the first matching dictionary entry in JavaScript object enumeration order wins: array-index keys such as `"2"` and `"10"` are visited in ascending numeric order before other string keys, which retain insertion order. Values are emitted verbatim, including whitespace and empty strings. Tool-result summaries and tool calls take precedence; unmatched text still receives the generic canned fallback. Omitting `cannedResponses` preserves the existing responses and streaming behavior.
 
 Alternatively, use `cannedResponses: './canned-responses.json'`, with a JSON object such as `{"reset password":"Open Settings → Security."}`. Relative paths resolve against the process working directory when the provider is constructed. The provider rereads and validates the file once per text-response selection, then uses that snapshot for the request; tool paths do not read it. There is no watcher or restart requirement. Missing or unreadable files, malformed JSON, non-object dictionaries, non-string values, and whitespace-only keys fail clearly. The next request retries, so correcting the file allows the same provider to recover.
 
@@ -786,7 +786,8 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     return { conversationId: await agent.createConversationId(userId) };
   },
   async sendMessage(conversationId: string, message: string, channelId: string, userId: string) {
-    await agent.stream(message, { conversationId, channelId, userId });
+    const result = await agent.stream(message, { conversationId, channelId, userId });
+    return { channelId: result.channelId };
   },
   async getConversation(conversationId: string) {
     const messages = await agent.getConversation(conversationId);
@@ -826,7 +827,87 @@ await chat.sendMessage('Hello!');
 await chat.loadConversation('conv-123');
 ```
 
-### 2. Support Agent with Tools
+The example above is framework-agnostic on purpose — `useChat` has no React import and works with any UI layer. The two examples below show how to bridge it into a specific framework's reactivity.
+
+### 2. React: hold the instance once, drive `useState` from the callbacks
+
+`useChat` is a factory, not a React hook, so it must **not** run on every render — recreating it drops the WebSocket subscription and conversation state each time. Hold the single instance in a `useRef` (created lazily so it survives re-renders), and turn the `onMessagesChange` / `onLoadingChange` / `onInterrupt` callbacks into `setState` calls so React re-renders when the mutable instance changes. This example keeps the `api` wiring minimal — it omits the `userId` that the End-to-End example (#1) threads through `createConversation` / `sendMessage`; thread it the same way here when your API needs it (or resolve the user server-side).
+
+```tsx
+'use client'; // Next.js only — see the note below. Plain React (Vite/CRA) can omit this.
+
+import { useRef, useState, useEffect } from 'react';
+import { useChat, type ChatMessage } from '@aws-blocks/bb-agent/client';
+import { api } from './api'; // your generated aws-blocks API client
+
+export function Chat() {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [input, setInput] = useState('');
+
+  // Create the instance exactly once. The ref survives every re-render,
+  // so the subscription and conversation state are never torn down.
+  // Type the ref as `| undefined` and initialize with `undefined` — @types/react 19
+  // tightened the useRef overloads, so a bare useRef<T>() no longer compiles.
+  const chatRef = useRef<ReturnType<typeof useChat> | undefined>(undefined);
+  if (!chatRef.current) {
+    // eslint-disable-next-line react-hooks/rules-of-hooks -- useChat is a factory, not a hook; the use-prefix trips the linter's hook heuristic.
+    chatRef.current = useChat({
+      api: {
+        sendMessage: (convId, msg, chId) => api.sendMessage(convId, msg, chId),
+        createConversation: () => api.createConversation(),
+        getConversation: (id) => api.getConversation(id),
+      },
+      subscribe: async (channelId, handler) => {
+        const channel = await api.getChannel(channelId);
+        return channel.subscribe(handler);
+      },
+      // Bridge the mutable instance into React state — these fire on every change.
+      onMessagesChange: setMessages,
+      onLoadingChange: setIsLoading,
+    });
+  }
+  const chat = chatRef.current!; // guaranteed set by the block above
+
+  // Tear down the WebSocket subscription when the component unmounts.
+  useEffect(() => () => chat.destroy(), [chat]);
+
+  async function handleSend(e: React.FormEvent) {
+    e.preventDefault();
+    const text = input.trim();
+    if (!text || isLoading) return;
+    setInput('');
+    await chat.sendMessage(text);
+  }
+
+  return (
+    <div>
+      <ul>
+        {messages.map((m) => (
+          <li key={m.id} data-role={m.role}>
+            <strong>{m.role}:</strong> {m.content}
+          </li>
+        ))}
+      </ul>
+      <form onSubmit={handleSend}>
+        <input value={input} onChange={(e) => setInput(e.target.value)} disabled={isLoading} />
+        <button type="submit" disabled={isLoading}>Send</button>
+      </form>
+    </div>
+  );
+}
+```
+
+Key points:
+
+- **One instance, held in a ref.** `useRef` + the lazy `if (!chatRef.current)` guard is the React idiom for "construct once." Because the identifier is `use`-prefixed, `eslint-plugin-react-hooks` (bundled in the default Next.js and CRA configs) flags the guarded call as a conditional hook (`react-hooks/rules-of-hooks`). `useChat` is a factory, not a hook, so this is a false positive — the inline `eslint-disable-next-line` above the call silences it. What you must **not** do is call `useChat(...)` unguarded on every render: that recreates the instance each time and is the footgun the factory note warns about.
+- **Callbacks are your reactivity bridge.** `useChat` mutates its own message list in place; `onMessagesChange` / `onLoadingChange` hand you the new value so you can `setState` and trigger a render. Passing `setMessages` / `setIsLoading` directly is enough.
+- **Clean up on unmount** with `chat.destroy()` in a `useEffect` cleanup, so the Realtime subscription is closed.
+- **Approvals:** wire `resume: (chId, responses, convId) => api.resume(chId, responses, convId)` into the `api` object above (mirroring your backend's resume method — `respondToInterrupt` throws if it is absent), add `onInterrupt: setInterrupts` (with `const [interrupts, setInterrupts] = useState<Array<{ id: string; name: string; reason?: unknown }>>([])` — a bare `useState([])` infers `never[]` and rejects the payload) to render an approval UI, then call `chat.respondToInterrupt([{ interruptId, approved: true }])`.
+
+**Next.js:** this is the same component — just keep the `'use client'` directive at the top of the file. `useChat` opens a browser WebSocket and holds client state, so it must run in a Client Component, never a Server Component. No other changes are needed.
+
+### 3. Support Agent with Tools
 
 Agent with tools that can look up orders and search documentation. Uses tool context to scope queries to the authenticated user.
 

@@ -68,3 +68,30 @@ Verification under Node `v22.23.1`:
 - `git diff --check` passed. Owned E2E processes were checked after completion; no remaining owned test server was found.
 
 Restricted runs of socket/IPC-using checks encountered `EPERM` and were retried with local test network permissions. Logs are under `/tmp/sigma-build.log`, `/tmp/sigma-focused.log`, `/tmp/sigma-bb-agent-test-escalated.log`, `/tmp/sigma-lint.log`, `/tmp/sigma-lint-deps-escalated.log`, `/tmp/sigma-npm-test-escalated.log`, `/tmp/sigma-check-api-escalated.log`, and `/tmp/sigma-e2e-local.log`. Commit `20f1112` remains unchanged and synced to origin; this correction is uncommitted and was not pushed.
+
+## Readiness follow-up against current upstream
+
+The user subsequently committed the sigma fix as `9d34b3a`; live remote inspection also found that commit on origin. On September 21 (Asia/Tokyo), upstream `main` at `5501cb67c73302f865eac9e22b1b5aaa880b4aec` was fetched and merged with `git merge --no-commit --no-ff upstream/main`. The merge applied cleanly and remains uncommitted. Personal tooling and integration configuration are retained at the user's request for implementation and can be removed from the submission diff later. The untracked feature-request draft is also retained.
+
+Upstream advances bb-agent to `0.4.1`; earlier `0.4.0` patch integration notes describe the original implementation baseline. Recheck the consuming application's installed version before applying this updated worktree's output. `npm ci` with Node `v22.23.1` installed the merged lockfile successfully without a lockfile edit.
+
+This follow-up adds public Agent coverage for a file-backed response across atomic replacement, malformed-file failure, and recovery on the same Agent, plus targeted phrase and JSON-validation edge cases. Documentation now defines first-match order as JavaScript object enumeration order: array-index keys are visited numerically before other string keys in insertion order.
+
+The public lifecycle test verifies the actual error surface: `stream()` returns its result, then `complete()` rejects with `AgentErrors.StreamFailed` and the malformed-JSON diagnostic. The same Agent subsequently reads the repaired dictionary successfully. Phrase tests cover literal regex metacharacters, tab/newline whitespace, and numeric-key precedence with a prompt ordered oppositely to dictionary enumeration. File validation covers null, strings, numbers, booleans, arrays, non-string values, and blank keys.
+
+Final integrated verification with Node `v22.23.1`:
+
+- `npm run build`: exit 0. The earlier package-only build encountered stale cross-package hosting declarations after the upstream integration; the root build resolved them without source changes.
+- `npm test -w packages/bb-agent`: exit 0; 118 runtime, four CDK, and one bundle test passed.
+- `npm run lint`: exit 0, with nine non-blocking warnings in existing bb-agent code.
+- `npm run lint:deps`: exit 0; 357 files checked.
+- `npm test`: exit 0.
+- `npm run check:api`: exit 0; reports up to date, no new API-report diff beyond the merged upstream changes, non-blocking documentation warnings.
+- `npm run test:e2e:local`: exit 0; comprehensive tests: 396 total, 395 passed, one skipped, zero failed; vendorization: eight passed. The dedicated `readiness-e2e` tmux session and owned server were absent after completion.
+- `git diff --check`: exit 0. Independent review of the added coverage and README clarification found no actionable issues.
+
+Logs retained at `/tmp/readiness-npm-ci.log`, `/tmp/readiness-bb-agent.log`, `/tmp/readiness-lint-deps.log`, `/tmp/readiness-npm-test.log`, `/tmp/readiness-check-api.log`, and `/tmp/readiness-e2e.log`. The upstream merge and new readiness edits remain uncommitted; no push or deployment was performed in this follow-up.
+
+## Branch backup
+
+The historical status notes above record each earlier checkpoint. The upstream integration, readiness tests, documentation clarification, and feature-request draft are included in the subsequent branch backup for switching computers. Personal tooling remains on this implementation branch by request; remove it when preparing the upstream submission diff.

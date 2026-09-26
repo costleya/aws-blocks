@@ -337,7 +337,7 @@ describe('CannedProvider', () => {
 		const provider = new CannedProvider({ responses: { 'sign in': 'first', sign: 'second' } });
 		const response = await collectText(provider, [
 			{ role: 'user', content: [{ text: 'weather' }] },
-			{ role: 'user', content: [{ text: 'Please SIGN' }, { text: '   IN!' }] },
+			{ role: 'user', content: [{ text: 'Please SIGN\t' }, { text: '\nIN!' }] },
 		]);
 		assert.strictEqual(response, 'first');
 		assert.match(await collectText(provider, [{ role: 'user', content: [{ text: 'resignation' }] }]), /No real model was called/);
@@ -345,9 +345,19 @@ describe('CannedProvider', () => {
 		assert.strictEqual(await collectText(punctuation, [{ role: 'user', content: [{ text: 'C++?' }] }]), 'C++ response');
 		assert.match(await collectText(punctuation, [{ role: 'user', content: [{ text: 'c++x' }] }]), /No real model was called/);
 		assert.match(await collectText(punctuation, [{ role: 'user', content: [{ text: 'xc++' }] }]), /No real model was called/);
+		const regexCharacters = new CannedProvider({ responses: { 'a.b*(c)?[d]': 'literal punctuation response' } });
+		assert.strictEqual(await collectText(regexCharacters, [{ role: 'user', content: [{ text: 'A.B*(C)?[D]!' }] }]), 'literal punctuation response');
+		assert.match(await collectText(regexCharacters, [{ role: 'user', content: [{ text: 'xa.b*(c)?[d]' }] }]), /No real model was called/);
 		const unicode = new CannedProvider({ responses: { naïve: 'unicode response' } });
 		assert.strictEqual(await collectText(unicode, [{ role: 'user', content: [{ text: 'NAÏVE!' }] }]), 'unicode response');
 		assert.match(await collectText(unicode, [{ role: 'user', content: [{ text: 'übernaïve' }] }]), /No real model was called/);
+	});
+
+	test('uses JavaScript Object.entries ordering for integer-like dictionary keys', async () => {
+		const responses = { 10: 'ten was inserted first', 2: 'two is enumerated first' };
+		assert.deepStrictEqual(Object.entries(responses).map(([phrase]) => phrase), ['2', '10']);
+		const provider = new CannedProvider({ responses });
+		assert.strictEqual(await collectText(provider, [{ role: 'user', content: [{ text: '10 then 2' }] }]), 'two is enumerated first');
 	});
 
 	test('gives tool results and tool calls precedence over dictionary responses', async () => {
@@ -717,6 +727,40 @@ describe('CannedProvider', () => {
 		});
 		const completion = await agent.stream('silent', { userId: 'test-user' });
 		assert.strictEqual((await completion.complete()).text, '');
+	});
+
+	test('Agent reloads a file-backed dictionary after atomic updates and recovers after malformed JSON', async () => {
+		const baseName = `.bb-agent-canned-agent-${process.pid}-${Date.now()}`;
+		const fileName = `${baseName}.json`;
+		const filePath = join(process.cwd(), fileName);
+		const replacementPath = join(process.cwd(), `${baseName}-replacement.json`);
+		const agent = new Agent(new Scope('test-canned-file-lifecycle'), 'file-lifecycle', {
+			inferenceOnly: true,
+			systemPrompt: 'test',
+			model: { local: { provider: 'canned', cannedResponses: fileName } },
+		});
+
+		try {
+			writeFileSync(filePath, JSON.stringify({ release: 'initial response' }));
+			assert.strictEqual((await (await agent.stream('release')).complete()).text, 'initial response');
+
+			writeFileSync(replacementPath, JSON.stringify({ release: 'atomically replaced response' }));
+			renameSync(replacementPath, filePath);
+			assert.strictEqual((await (await agent.stream('release')).complete()).text, 'atomically replaced response');
+
+			writeFileSync(filePath, '{ malformed');
+			const malformed = await agent.stream('release');
+			await assert.rejects(
+				() => malformed.complete(),
+				error => error instanceof Error && error.name === AgentErrors.StreamFailed && /Malformed canned responses JSON/.test(error.message),
+			);
+
+			writeFileSync(filePath, JSON.stringify({ recovered: 'healthy again' }));
+			assert.strictEqual((await (await agent.stream('recovered')).complete()).text, 'healthy again');
+		} finally {
+			rmSync(filePath, { force: true });
+			rmSync(replacementPath, { force: true });
+		}
 	});
 
 	test("getConversation with limit returns most recent messages", async () => {
@@ -1305,11 +1349,11 @@ describe('model-factory', () => {
 			const unreadable = await createStrandsModel({ provider: 'canned', cannedResponses: directoryPath });
 			assert.ok(unreadable instanceof CannedProvider);
 			await assert.rejects(() => responseFor(unreadable, 'anything'), /Unable to read canned responses file/);
-			for (const content of [JSON.stringify(['not', 'an object']), JSON.stringify({ release: 1 }), JSON.stringify({ '': 'blank key' })]) {
+			for (const content of [JSON.stringify(null), JSON.stringify('not an object'), JSON.stringify(42), JSON.stringify(true), JSON.stringify(['not', 'an object']), JSON.stringify({ release: 1 }), JSON.stringify({ '': 'blank key' })]) {
 				writeFileSync(absolutePath, content);
 				const invalid = await createStrandsModel({ provider: 'canned', cannedResponses: fileName });
 				assert.ok(invalid instanceof CannedProvider);
-				await assert.rejects(() => responseFor(invalid, 'release'));
+				await assert.rejects(() => responseFor(invalid, 'release'), /must be an object mapping|must be a string|blank response phrase/);
 			}
 		} finally {
 			rmSync(absolutePath, { force: true });
@@ -1363,8 +1407,32 @@ describe('model-factory', () => {
 // ── useChat ──────────────────────────────────────────────────────────────────
 
 import { useChat } from './index.hooks.js';
+import type { UseChatOptions } from './index.hooks.js';
 
 describe('useChat', () => {
+	// Type-only regression guard for the api return-type contract (PR that widened
+	// sendMessage/resume from Promise<void> to Promise<unknown>). This is compiled by
+	// `tsc --build` before the runtime tests execute, so narrowing either member back
+	// to Promise<void> fails CI here — the durable proof the manual PR check could not
+	// commit. `unknown` must accept BOTH a natural object-returning backend and a
+	// void-returning one; both assignments below must type-check.
+	test('api sendMessage/resume accept object- and void-returning backends (type-only)', () => {
+		const objectBackend: UseChatOptions['api'] = {
+			sendMessage: async () => ({ channelId: 'c' }),
+			createConversation: async () => ({ conversationId: 'c' }),
+			getConversation: async () => ({ messages: [] }),
+			resume: async () => ({ ok: true }),
+		};
+		const voidBackend: UseChatOptions['api'] = {
+			sendMessage: async () => {},
+			createConversation: async () => ({ conversationId: 'c' }),
+			getConversation: async () => ({ messages: [] }),
+			resume: async () => {},
+		};
+		assert.ok(objectBackend.sendMessage);
+		assert.ok(voidBackend.sendMessage);
+	});
+
 	test('onError is called when error chunk arrives', async () => {
 		let chunkHandler: (chunk: any) => void;
 		let errorReceived: string | undefined;
