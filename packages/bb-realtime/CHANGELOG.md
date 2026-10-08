@@ -1,5 +1,20 @@
 # @aws-blocks/bb-realtime
 
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [e682ba7]
+- Updated dependencies [e7e96e6]
+- Updated dependencies [6d764f7]
+- Updated dependencies [cb0ec01]
+- Updated dependencies [2da2fd4]
+  - @aws-blocks/bb-lambda-compute@0.5.2
+  - @aws-blocks/core@0.7.0
+  - @aws-blocks/bb-app-setting@0.3.2
+  - @aws-blocks/bb-distributed-table@0.2.2
+  - @aws-blocks/bb-logger@0.2.2
+
 ## 0.3.0
 
 ### Minor Changes
